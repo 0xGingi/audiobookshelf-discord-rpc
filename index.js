@@ -51,6 +51,7 @@ async function getCoverPath(title, author) {
 }
 let lastKnownTime = null;
 let isPaused = false;
+let currentBook = null;
 
 async function setActivity() {
   const options = {
@@ -76,6 +77,12 @@ async function setActivity() {
         const author = session.author;
         const currentTime = session.currentTime;
         const totalTime = formatTime(session.duration);
+
+        if (currentBook === null || currentBook.name !== bookName) {
+          currentBook = { name: bookName, author: author };
+          lastKnownTime = null;
+          isPaused = false;
+        }
 
         if (lastKnownTime === null) {
           lastKnownTime = currentTime;
