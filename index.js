@@ -102,7 +102,7 @@ async function setActivity() {
         if (!isPaused) {
           getCoverPath(bookName, author).then(coverUrl => {
             rpc.setActivity({
-              details: `Listening to ${bookName}`,
+              details: `${bookName}`,
               state: `${formatTime(currentTime)} / ${totalTime}`,
               largeImageKey: coverUrl,
               largeImageText: bookName,
