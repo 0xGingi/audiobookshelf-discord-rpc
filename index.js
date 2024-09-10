@@ -50,54 +50,74 @@ async function getCoverPath(title, author) {
     });
 }
 
-async function setActivity() {
-    const options = {
-      hostname: new URL(audiobookshelfUrl).hostname,
-      path: `/api/me/listening-sessions?itemsPerPage=1`,
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${audiobookshelfToken}`
-      }
-    };
+let lastCurrentTime = 0;
+let lastUpdatedAt = 0;
 
-    const req = https.request(options, (res) => {
-      let data = '';
-  
-      res.on('data', (chunk) => {
-        data += chunk;
-      });
-  
-      res.on('end', () => {
-        try {
-          const session = JSON.parse(data).sessions[0];
+async function setActivity() {
+  const options = {
+    hostname: new URL(audiobookshelfUrl).hostname,
+    path: `/api/me/listening-sessions?itemsPerPage=10`,
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${audiobookshelfToken}`
+    }
+  };
+
+  const req = https.request(options, (res) => {
+    let data = '';
+
+    res.on('data', (chunk) => {
+      data += chunk;
+    });
+
+    res.on('end', () => {
+      try {
+        const response = JSON.parse(data);
+        const activeSessions = response.sessions.filter(session => {
+          const startedAt = session.startedAt;
+          const updatedAt = session.updatedAt;
+          const elapsedTime = updatedAt - lastUpdatedAt;
+          lastUpdatedAt = updatedAt;
+          return updatedAt - startedAt > elapsedTime;
+        });
+        if (activeSessions.length > 0) {
+          const session = activeSessions[0];
           const bookName = session.displayTitle;
-          const author = session.author; 
+          const author = session.author;
           const currentTime = formatTime(session.currentTime);
           const totalTime = formatTime(session.duration);
-          getCoverPath(bookName, author).then(coverUrl => {
-        
-          rpc.setActivity({
-            details: `Listening to ${bookName}`,
-            state: `${currentTime} / ${totalTime}`,
-            largeImageKey: coverUrl,
-            largeImageText: bookName,
-            instance: false,
-          });
-        }).catch(error => {
-            console.error('Error fetching cover URL:', error);
-        })
-        } catch (error) {
-          console.error('Error fetching listening session:', error);
+          if (session.currentTime === lastCurrentTime) {
+            rpc.clearActivity();
+          } else {
+            getCoverPath(bookName, author).then(coverUrl => {
+              rpc.setActivity({
+                details: `Listening to ${bookName}`,
+                state: `${currentTime} / ${totalTime}`,
+                largeImageKey: coverUrl,
+                largeImageText: bookName,
+                instance: false,
+              });
+            }).catch(error => {
+              console.error('Error fetching cover URL:', error);
+            });
+          }
+          lastCurrentTime = session.currentTime;
+        } else {
+          rpc.clearActivity();
         }
-      });
+      } catch (error) {
+        console.error('Error fetching listening session:', error);
+      }
     });
-  
-    req.on('error', (error) => {
-      console.error('Error making request:', error);
-    });
-  
-    req.end();
-  }
+  });
+
+  req.on('error', (error) => {
+    console.error('Error making request:', error);
+  });
+
+  req.end();
+}
+
 
 function formatTime(seconds) {
   const hours = Math.floor(seconds / 3600);
@@ -111,7 +131,7 @@ rpc.on('ready', () => {
   setActivity();
   setInterval(() => {
     setActivity();
-  }, 15000);
+  }, 5000);
 });
 
 rpc.login({ clientId }).catch(console.error);
