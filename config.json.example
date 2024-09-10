@@ -1,0 +1,11 @@
+{
+
+  "audiobookshelfUrl": "https://your-audiobookshelf-server.com",
+
+  "audiobookshelfToken": "YOUR_AUDIOBOOKSHELF_API_TOKEN",
+
+  "audiobookshelfUserId": "AUDIOBOOKSHELF_USER_ID",
+
+  "discordClientId": "1283070638088650752"
+
+}

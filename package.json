@@ -1,0 +1,20 @@
+{
+  "name": "audiobookshelf-discord-rpc",
+  "version": "1.0.0",
+  "main": "index.js",
+  "keywords": [],
+  "author": "0xGingi",
+  "license": "MIT",
+  "description": "Display What you're Listening to on AudiobookShelf on Discord!",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0xgingi/audiobookshelf-discord-rpc.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0xgingi/audiobookshelf-discord-rpc/issues"
+  },
+  "homepage": "https://github.com/0xgingi/audiobookshelf-discord-rpc#readme",
+  "dependencies": {
+    "discord-rpc": "^4.0.1"
+  }
+}
