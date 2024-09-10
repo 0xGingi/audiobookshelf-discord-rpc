@@ -49,14 +49,13 @@ async function getCoverPath(title, author) {
         req.end();
     });
 }
-
-let lastCurrentTime = 0;
-let lastUpdatedAt = 0;
+let lastKnownTime = null;
+let isPaused = false;
 
 async function setActivity() {
   const options = {
     hostname: new URL(audiobookshelfUrl).hostname,
-    path: `/api/me/listening-sessions?itemsPerPage=10`,
+    path: `/api/me/listening-sessions?itemsPerPage=1`,
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${audiobookshelfToken}`
@@ -72,38 +71,39 @@ async function setActivity() {
 
     res.on('end', () => {
       try {
-        const response = JSON.parse(data);
-        const activeSessions = response.sessions.filter(session => {
-          const startedAt = session.startedAt;
-          const updatedAt = session.updatedAt;
-          const elapsedTime = updatedAt - lastUpdatedAt;
-          lastUpdatedAt = updatedAt;
-          return updatedAt - startedAt > elapsedTime;
-        });
-        if (activeSessions.length > 0) {
-          const session = activeSessions[0];
-          const bookName = session.displayTitle;
-          const author = session.author;
-          const currentTime = formatTime(session.currentTime);
-          const totalTime = formatTime(session.duration);
-          if (session.currentTime === lastCurrentTime) {
+        const session = JSON.parse(data).sessions[0];
+        const bookName = session.displayTitle;
+        const author = session.author;
+        const currentTime = session.currentTime;
+        const totalTime = formatTime(session.duration);
+
+        if (lastKnownTime === null) {
+          lastKnownTime = currentTime;
+        } else if (currentTime === lastKnownTime) {
+          if (!isPaused) {
+            console.log('Book paused. Clearing activity.');
             rpc.clearActivity();
-          } else {
-            getCoverPath(bookName, author).then(coverUrl => {
-              rpc.setActivity({
-                details: `Listening to ${bookName}`,
-                state: `${currentTime} / ${totalTime}`,
-                largeImageKey: coverUrl,
-                largeImageText: bookName,
-                instance: false,
-              });
-            }).catch(error => {
-              console.error('Error fetching cover URL:', error);
-            });
+            isPaused = true;
           }
-          lastCurrentTime = session.currentTime;
+          return;
         } else {
-          rpc.clearActivity();
+          isPaused = false;
+        }
+
+        lastKnownTime = currentTime;
+
+        if (!isPaused) {
+          getCoverPath(bookName, author).then(coverUrl => {
+            rpc.setActivity({
+              details: `Listening to ${bookName}`,
+              state: `${formatTime(currentTime)} / ${totalTime}`,
+              largeImageKey: coverUrl,
+              largeImageText: bookName,
+              instance: false,
+            });
+          }).catch(error => {
+            console.error('Error fetching cover URL:', error);
+          });
         }
       } catch (error) {
         console.error('Error fetching listening session:', error);
@@ -118,7 +118,6 @@ async function setActivity() {
   req.end();
 }
 
-
 function formatTime(seconds) {
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
@@ -131,7 +130,7 @@ rpc.on('ready', () => {
   setActivity();
   setInterval(() => {
     setActivity();
-  }, 5000);
+  }, 15000);
 });
 
 rpc.login({ clientId }).catch(console.error);
