@@ -54,18 +54,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let config_path = install_path.with_file_name("config.json");
         fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
         println!("Config file created at: {}", config_path.display());
-    
-        #[cfg(target_os = "windows")]
-        create_windows_service(&install_path)?;
-        
-        #[cfg(not(target_os = "windows"))]
-        create_linux_service(&install_path)?;
     } else {
         println!("Skipping config.json generation.");
         println!("Note: You'll need to create a config.json file manually before running the service.");
     }
+
+    let should_install_service = prompt_with_default("Do you want to install a autostart service?", "yes")?
+        .to_lowercase();
+    
+    if should_install_service == "yes" || should_install_service == "y" {
+        #[cfg(target_os = "windows")]
+        create_windows_service(&install_path)?;
+
+        #[cfg(not(target_os = "windows"))]
+        create_linux_service(&install_path)?;
+    } else {
+        println!("Skipping service installation.");
+        println!("Note: You'll need to start the service manually or create a service");
+    }
+
     
     println!("Installation and configuration complete!");
+    wait_for_key_press();
     Ok(())
 }
 
@@ -132,28 +142,36 @@ fn prompt(prompt: &str) -> Result<String, io::Error> {
 
 #[cfg(target_os = "windows")]
 fn create_windows_service(install_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Creating Windows service...");
-    
-    let bat_path = install_path.with_file_name("run_audiobookshelf_discord_rpc.bat");
-    let bat_content = format!("@echo off\n\"{}\" -c \"{}\"", 
-        install_path.display(), 
-        install_path.with_file_name("config.json").display());
-    fs::write(&bat_path, bat_content)?;
+    println!("Creating Windows Task Scheduler task...");
 
-    let output = Command::new("sc")
-        .args(&[
-            "create", "AudiobookshelfDiscordRPC",
-            "binPath=", &bat_path.to_string_lossy(),
-            "start=", "auto",
-            "displayname=", "Audiobookshelf Discord RPC"
-        ])
+    let task_name = "AudiobookshelfDiscordRPC";
+    let task_program = install_path.display().to_string();
+    let task_arguments = format!("-c \"{}\"", install_path.with_file_name("config.json").display());
+
+    let powershell_args = &[
+        "-Command",
+        &format!(
+            "$action = New-ScheduledTaskAction -Execute '{}' -Argument '{}'; $trigger = New-ScheduledTaskTrigger -AtLogon; $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest; Register-ScheduledTask -TaskName '{}' -Action $action -Trigger $trigger -Principal $principal -Force; Start-ScheduledTask -TaskName '{}'",
+            task_program,
+            task_arguments,
+            task_name,
+            task_name
+        ),
+    ];
+
+    let powershell_command = format!("powershell {}", powershell_args[1]);
+
+    let output = Command::new("powershell")
+        .args(powershell_args)
         .output()?;
 
-    if !output.status.success() {
-        return Err(format!("Failed to create Windows service: {:?}", output).into());
+    if output.status.success() {
+        println!("Windows Task Scheduler task created and started successfully.");
+    } else {
+        println!("Failed to create or start Windows Task Scheduler task.");
+        println!("PowerShell command output: {}", String::from_utf8_lossy(&output.stderr));
     }
 
-    println!("Windows service created successfully.");
     Ok(())
 }
 
@@ -186,4 +204,10 @@ WantedBy=default.target
 
     println!("Linux systemd service created and started successfully.");
     Ok(())
+}
+
+fn wait_for_key_press() {
+    println!("Press any key to exit...");
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).expect("Failed to read line");
 }
