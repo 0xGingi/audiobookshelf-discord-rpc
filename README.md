@@ -5,6 +5,8 @@ Displays what you're listening to on audiobookshelf on discord!
 
 * Note: This will display what you're listening to on any device but you must run this program on a computer with discord installed!
 
+* The Installer can also be used as an updater, just cancel it after it downloads the new binary!
+
 ## Run
 
 ### Windows
