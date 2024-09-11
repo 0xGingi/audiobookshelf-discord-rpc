@@ -5,6 +5,7 @@ use tokio::time;
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 use reqwest::Client;
 use url::Url;
+use std::env;
 
 #[derive(Debug)]
 struct Config {
@@ -22,7 +23,21 @@ struct Book {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_config()?;
+    let args: Vec<String> = env::args().collect();
+    let config_file = if let Some(index) = args.iter().position(|arg| arg == "-c") {
+        if index + 1 < args.len() {
+            &args[index + 1]
+        } else {
+            eprintln!("Error: missing argument for -c option");
+            return Err("missing argument for -c option".into());
+        }
+    } else {
+        "config.json"
+    };
+
+    println!("Using config file: {}", config_file);
+
+    let config = load_config(config_file).await?;
     let mut discord = DiscordIpcClient::new(&config.discord_client_id)?;
     discord.connect()?;
 
@@ -42,8 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
-    let config_str = fs::read_to_string("config.json")?;
+async fn load_config(config_file: &str) -> Result<Config, Box<dyn std::error::Error>> {
+    let config_str = fs::read_to_string(config_file)?;
     let config: Value = serde_json::from_str(&config_str)?;
     
     Ok(Config {
