@@ -1,21 +1,22 @@
 # audiobookshelf-discord-rpc
 Displays what you're listening to on audiobookshelf on discord!
 
+* Now Rewritten in Rust!
+
 * Note: This will display what you're listening to on any device but you must run this program on a computer with discord installed!
 
-## Install & Run
+## Run
 
-* Requires NodeJS & NPM
+* Rename config.json.example to config.json and modify it! You can get your API Key when clicking on your username in settings.
 
+* Make sure your config.json is in the same directory as the executable!
+
+* Download an executable for your OS from the [releases](https://github.com/0xgingi/audiobookshelf-discord-rpc/releases) page!
+
+## Build
 ```
 git clone https://github.com/0xgingi/audiobookshelf-discord-rpc
 cd audiobookshelf-discord-rpc
-npm i
-```
-Rename config.json.example to config.json and modify it! You can get your API Key when clicking on your username in settings.
-
-## Run
-```
-node index.js
+cargo build --release
 ```
 
