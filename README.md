@@ -22,6 +22,13 @@ Displays what you're listening to on audiobookshelf on discord!
 * Create the systemd service (runs as user)
 * audiobookshelf-discord-rpc should now be started and will run on boot
 
+## Get API Key (Must Be Admin)
+![abs-api-1](https://github.com/user-attachments/assets/57a0c95d-acfc-447e-aa6a-fc8651ddca24)
+![abs-api-2](https://github.com/user-attachments/assets/b712957b-3402-469c-a85c-8f283ccc8c08)
+![abs-api-3](https://github.com/user-attachments/assets/edf71490-a695-443e-b25f-98923107f70b)
+
+
+
 ## Build
 ```
 git clone https://github.com/0xgingi/audiobookshelf-discord-rpc
