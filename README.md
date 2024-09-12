@@ -5,6 +5,8 @@ Displays what you're listening to on audiobookshelf on discord!
 
 * Note: This will display what you're listening to on any device but you must run this program on a computer with discord installed!
 
+* The Installer can also be used as an updater, just cancel it after it downloads the new binary!
+
 ## Run
 
 ### Windows
@@ -13,6 +15,7 @@ Displays what you're listening to on audiobookshelf on discord!
 * Generate your config file
 * Create the startup task
 * audiobookshelf-discord-rpc should now be started and will run on boot
+* Files are located at %localappdata%/AudiobookshelfDiscordRPC & Service is created with Task Scheduler
 ### Linux
 * [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/v1.0.0/audiobookshelf-discord-rpc-installer-linux)
 ```
@@ -21,6 +24,7 @@ Displays what you're listening to on audiobookshelf on discord!
 * Generate your config file
 * Create the systemd service (runs as user)
 * audiobookshelf-discord-rpc should now be started and will run on boot
+* Executable and config.json are located at ~/.local/bin/ & systemd service is located at ~/.config/systemd/user/audiobookshelf-discord-rpc.service
 
 ## Get API Key (Must Be Admin)
 ![abs-api-1](https://github.com/user-attachments/assets/57a0c95d-acfc-447e-aa6a-fc8651ddca24)
