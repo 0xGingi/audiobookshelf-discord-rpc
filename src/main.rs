@@ -129,7 +129,7 @@ async fn set_activity(
             .state(&state)
             .assets(activity::Assets::new()
                 .large_image(&cover_url)
-                .large_text(book_name))
+                .large_text(author))
             .activity_type(activity::ActivityType::Listening);
         
         discord.set_activity(activity)?;
