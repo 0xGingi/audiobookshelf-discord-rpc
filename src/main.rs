@@ -1,3 +1,4 @@
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 use serde_json::Value;
 use std::fs;
 use std::time::Duration;
@@ -23,6 +24,15 @@ struct Book {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match check_for_update().await {
+        Ok(Some(latest_version)) => {
+            println!("A new version is available: {}. You're currently running version {}.", latest_version, CURRENT_VERSION);
+            println!("Please re-run the installer or visit https://github.com/0xGingi/audiobookshelf-discord-rpc/releases to download the latest version.");
+        },
+        Ok(None) => println!("You're running the latest version: {}", CURRENT_VERSION),
+        Err(e) => eprintln!("Failed to check for updates: {}", e),
+    }
+
     let args: Vec<String> = env::args().collect();
     let config_file = if let Some(index) = args.iter().position(|arg| arg == "-c") {
         if index + 1 < args.len() {
@@ -123,18 +133,18 @@ async fn set_activity(
 
     if !*is_paused {
         let cover_url = get_cover_path(config, book_name, author).await?;
-        let state = format!("{} / {}", format_time(current_time), total_time);
+        let duration = format!("{} / {}", format_time(current_time), total_time);
         let activity = activity::Activity::new()
             .details(book_name)
-            .state(&state)
+            .state(author)
             .assets(activity::Assets::new()
                 .large_image(&cover_url)
-                .large_text(author))
+                .large_text(&duration))
             .activity_type(activity::ActivityType::Listening);
         
         discord.set_activity(activity)?;
     }
-
+    
     Ok(())
 }
 
@@ -164,4 +174,32 @@ async fn get_cover_path(config: &Config, title: &str, author: &str) -> Result<St
     }
     
     results[0].as_str().ok_or("Invalid cover URL").map(|s| s.to_string()).map_err(|e| e.into())
+}
+
+async fn check_for_update() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let url = "https://api.github.com/repos/0xGingi/audiobookshelf-discord-rpc/releases/latest";
+    let client = reqwest::Client::new();
+    let resp = client.get(url)
+        .header("User-Agent", "Audiobookshelf-Discord-RPC")
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API request failed with status: {}", resp.status()).into());
+    }
+
+    let body = resp.text().await?;
+    let json: serde_json::Value = serde_json::from_str(&body)?;
+
+    match json.get("tag_name") {
+        Some(tag) => {
+            let latest_version = tag.as_str().unwrap_or_default().trim_start_matches('v');
+            if latest_version != CURRENT_VERSION {
+                Ok(Some(latest_version.to_string()))
+            } else {
+                Ok(None)
+            }
+        },
+        None => Err("No tag_name found in the response".into()),
+    }
 }
