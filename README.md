@@ -1,5 +1,6 @@
 # audiobookshelf-discord-rpc
 Displays what you're listening to on audiobookshelf on discord!
+
 Shows Book Name, Author, Duration (Updated every 15 seconds), and Cover Art
 
 * Now Rewritten in Rust! [You can find the NodeJS Branch here](https://github.com/0xGingi/audiobookshelf-discord-rpc/tree/Javascript)
