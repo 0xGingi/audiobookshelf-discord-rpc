@@ -7,7 +7,7 @@ Shows Book Name, Author, Duration (Updated every 15 seconds), and Cover Art
 
 * Note: This will display what you're listening to on any device but you must run this program on a computer with discord installed!
 
-* The Installer can also be used as an updater, just cancel it after it downloads the new binary!
+* The Installer now has an update feature, just press u and let it do its thing!
 
 ![screenshot-2024-09-13-16-14-18](https://github.com/user-attachments/assets/fd999961-93f8-4770-b824-af400e38352b)
 
