@@ -1,14 +1,16 @@
-const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
 use std::time::Duration;
 use tokio::time;
-use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
+use discord_rich_presence::{activity, DiscordIpcClient, DiscordIpc};
 use reqwest::Client;
 use url::Url;
 use std::env;
 
-#[derive(Debug)]
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug, Deserialize)]
 struct Config {
     discord_client_id: String,
     audiobookshelf_url: String,
@@ -22,84 +24,97 @@ struct Book {
     author: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReleaseInfo {
+    tag_name: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    match check_for_update().await {
-        Ok(Some(latest_version)) => {
-            println!("A new version is available: {}. You're currently running version {}.", latest_version, CURRENT_VERSION);
-            println!("Please re-run the installer or visit https://github.com/0xGingi/audiobookshelf-discord-rpc/releases to download the latest version.");
-        },
-        Ok(None) => println!("You're running the latest version: {}", CURRENT_VERSION),
-        Err(e) => eprintln!("Failed to check for updates: {}", e),
+    let client = Client::new();
+
+    if let Some(latest_version) = check_for_update(&client).await? {
+        println!(
+            "A new version is available: {}. You're currently running version {}.",
+            latest_version, CURRENT_VERSION
+        );
+        println!("Please re-run the installer or visit https://github.com/0xGingi/audiobookshelf-discord-rpc/releases to download the latest version.");
+    } else {
+        println!("You're running the latest version: {}", CURRENT_VERSION);
     }
 
-    let args: Vec<String> = env::args().collect();
-    let config_file = if let Some(index) = args.iter().position(|arg| arg == "-c") {
-        if index + 1 < args.len() {
-            &args[index + 1]
-        } else {
-            eprintln!("Error: missing argument for -c option");
-            return Err("missing argument for -c option".into());
-        }
-    } else {
-        "config.json"
-    };
-
+    let config_file = parse_args()?;
     println!("Using config file: {}", config_file);
 
-    let config = load_config(config_file).await?;
+    let config = load_config(&config_file)?;
     let mut discord = DiscordIpcClient::new(&config.discord_client_id)?;
     discord.connect()?;
-
     println!("Audiobookshelf Discord RPC Connected!");
 
-    let client = Client::new();
     let mut last_known_time: Option<f64> = None;
     let mut is_paused = false;
     let mut current_book: Option<Book> = None;
 
     loop {
-        match set_activity(&config, &client, &mut discord, &mut last_known_time, &mut is_paused, &mut current_book).await {
-            Ok(_) => (),
-            Err(e) => eprintln!("Error setting activity: {}", e),
+        if let Err(e) = set_activity(
+            &client,
+            &config,
+            &mut discord,
+            &mut last_known_time,
+            &mut is_paused,
+            &mut current_book,
+        )
+        .await
+        {
+            eprintln!("Error setting activity: {}", e);
         }
         time::sleep(Duration::from_secs(15)).await;
     }
 }
 
-async fn load_config(config_file: &str) -> Result<Config, Box<dyn std::error::Error>> {
+fn parse_args() -> Result<String, Box<dyn std::error::Error>> {
+    let args: Vec<String> = env::args().collect();
+    if let Some(index) = args.iter().position(|arg| arg == "-c") {
+        if index + 1 < args.len() {
+            Ok(args[index + 1].clone())
+        } else {
+            Err("Error: missing argument for -c option".into())
+        }
+    } else {
+        Ok("config.json".to_string())
+    }
+}
+
+fn load_config(config_file: &str) -> Result<Config, Box<dyn std::error::Error>> {
     let config_str = fs::read_to_string(config_file)?;
-    let config: Value = serde_json::from_str(&config_str)?;
-    
-    Ok(Config {
-        discord_client_id: config["discordClientId"].as_str().unwrap().to_string(),
-        audiobookshelf_url: config["audiobookshelfUrl"].as_str().unwrap().to_string(),
-        audiobookshelf_token: config["audiobookshelfToken"].as_str().unwrap().to_string(),
-        audiobookshelf_user_id: config["audiobookshelfUserId"].as_str().unwrap().to_string(),
-    })
+    let config: Config = serde_json::from_str(&config_str)?;
+    Ok(config)
 }
 
 async fn set_activity(
-    config: &Config,
     client: &Client,
+    config: &Config,
     discord: &mut DiscordIpcClient,
     last_known_time: &mut Option<f64>,
     is_paused: &mut bool,
     current_book: &mut Option<Book>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let url = format!("{}/api/me/listening-sessions?itemsPerPage=1", config.audiobookshelf_url);
-    let resp = client.get(&url)
-        .header("Authorization", format!("Bearer {}", config.audiobookshelf_token))
+    let resp = client
+        .get(&url)
+        .bearer_auth(&config.audiobookshelf_token)
         .send()
         .await?
         .json::<Value>()
         .await?;
+
     let sessions = resp["sessions"].as_array().ok_or("No sessions found")?;
     if sessions.is_empty() {
         println!("No active listening session");
         discord.clear_activity()?;
         return Ok(());
     }
+
     let session = &sessions[0];
     let book_name = session["displayTitle"].as_str().ok_or("Missing display title")?;
     let author = session["displayAuthor"].as_str().ok_or("Missing author")?;
@@ -116,70 +131,75 @@ async fn set_activity(
         *is_paused = false;
     }
 
-    if last_known_time.is_none() {
-        *last_known_time = Some(current_time);
-    } else if current_time == last_known_time.unwrap() {
-        if !*is_paused {
-            println!("Book paused. Clearing activity.");
-            discord.clear_activity()?;
-            *is_paused = true;
+    if let Some(last_time) = last_known_time {
+        if (current_time - *last_time).abs() < f64::EPSILON {
+            if !*is_paused {
+                println!("Book paused. Clearing activity.");
+                discord.clear_activity()?;
+                *is_paused = true;
+            }
+            return Ok(());
         }
-        return Ok(());
-    } else {
-        *is_paused = false;
     }
 
     *last_known_time = Some(current_time);
+    *is_paused = false;
 
-    if !*is_paused {
-        let cover_url = get_cover_path(config, book_name, author).await?;
-        let duration = format!("{} / {}", format_time(current_time), total_time);
-        let activity = activity::Activity::new()
-            .details(book_name)
-            .state(author)
-            .assets(activity::Assets::new()
+    let cover_url = get_cover_path(client, config, book_name, author).await?;
+    let duration_str = format!("{} / {}", format_time(current_time), total_time);
+    let activity = activity::Activity::new()
+        .details(book_name)
+        .state(author)
+        .assets(
+            activity::Assets::new()
                 .large_image(&cover_url)
-                .large_text(&duration))
-            .activity_type(activity::ActivityType::Listening);
-        
-        discord.set_activity(activity)?;
-    }
-    
+                .large_text(&duration_str),
+        )
+        .activity_type(activity::ActivityType::Listening);
+
+    discord.set_activity(activity)?;
     Ok(())
 }
 
 fn format_time(seconds: f64) -> String {
-    let hours = (seconds / 3600.0).floor();
-    let minutes = ((seconds % 3600.0) / 60.0).floor();
-    let remaining_seconds = (seconds % 60.0).floor();
+    let total_seconds = seconds as u64;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let remaining_seconds = total_seconds % 60;
     format!("{:02}:{:02}:{:02}", hours, minutes, remaining_seconds)
 }
 
-async fn get_cover_path(config: &Config, title: &str, author: &str) -> Result<String, Box<dyn std::error::Error>> {
+async fn get_cover_path(
+    client: &Client,
+    config: &Config,
+    title: &str,
+    author: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let url = Url::parse_with_params(
         &format!("{}/api/search/covers", config.audiobookshelf_url),
-        &[("title", title), ("author", author), ("provider", "audible")]
+        &[("title", title), ("author", author), ("provider", "audible")],
     )?;
 
-    let resp = Client::new().get(url)
-        .header("Authorization", format!("Bearer {}", config.audiobookshelf_token))
+    let resp = client
+        .get(url)
+        .bearer_auth(&config.audiobookshelf_token)
         .send()
         .await?
         .json::<Value>()
         .await?;
 
     let results = resp["results"].as_array().ok_or("No cover results found")?;
-    if results.is_empty() {
-        return Err("No cover URL found".into());
+    if let Some(cover_url) = results.get(0).and_then(Value::as_str) {
+        Ok(cover_url.to_string())
+    } else {
+        Err("No valid cover URL found".into())
     }
-    
-    results[0].as_str().ok_or("Invalid cover URL").map(|s| s.to_string()).map_err(|e| e.into())
 }
 
-async fn check_for_update() -> Result<Option<String>, Box<dyn std::error::Error>> {
+async fn check_for_update(client: &Client) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let url = "https://api.github.com/repos/0xGingi/audiobookshelf-discord-rpc/releases/latest";
-    let client = reqwest::Client::new();
-    let resp = client.get(url)
+    let resp = client
+        .get(url)
         .header("User-Agent", "Audiobookshelf-Discord-RPC")
         .send()
         .await?;
@@ -188,18 +208,12 @@ async fn check_for_update() -> Result<Option<String>, Box<dyn std::error::Error>
         return Err(format!("GitHub API request failed with status: {}", resp.status()).into());
     }
 
-    let body = resp.text().await?;
-    let json: serde_json::Value = serde_json::from_str(&body)?;
+    let release_info: ReleaseInfo = resp.json().await?;
+    let latest_version = release_info.tag_name.trim_start_matches('v');
 
-    match json.get("tag_name") {
-        Some(tag) => {
-            let latest_version = tag.as_str().unwrap_or_default().trim_start_matches('v');
-            if latest_version != CURRENT_VERSION {
-                Ok(Some(latest_version.to_string()))
-            } else {
-                Ok(None)
-            }
-        },
-        None => Err("No tag_name found in the response".into()),
+    if latest_version != CURRENT_VERSION {
+        Ok(Some(latest_version.to_string()))
+    } else {
+        Ok(None)
     }
 }
