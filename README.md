@@ -7,7 +7,7 @@ Shows Book Name, Author, Duration (Updated every 15 seconds), and Cover Art
 
 * Note: This will display what you're listening to on any device but you must run this program on a computer with discord installed!
 
-* The Installer can also be used as an updater, just cancel it after it downloads the new binary!
+* The Installer now has an update feature, just press u and let it do its thing!
 
 ![screenshot-2024-09-13-16-14-18](https://github.com/user-attachments/assets/fd999961-93f8-4770-b824-af400e38352b)
 
@@ -15,14 +15,14 @@ Shows Book Name, Author, Duration (Updated every 15 seconds), and Cover Art
 ## Run
 
 ### Windows
-* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/v1.0.0/audiobookshelf-discord-rpc-installer.exe)
+* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.1.0/audiobookshelf-discord-rpc-installer.exe)
 * **Run the installer as admin to have the autostart service** 
 * Generate your config file
 * Create the startup task
 * audiobookshelf-discord-rpc should now be started and will run on boot
 * Files are located at %localappdata%/AudiobookshelfDiscordRPC & Service is created with Task Scheduler
 ### Linux
-* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/v1.0.0/audiobookshelf-discord-rpc-installer-linux)
+* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.1.0/audiobookshelf-discord-rpc-installer)
 ```
 ./audiobookshelf-discord-rpc-installer-linux
 ```
