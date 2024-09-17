@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use reqwest;
+use reqwest::Client;
 use serde_json::json;
 use std::process::Command;
 
@@ -12,7 +12,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let action = prompt_with_default("Do you want to (i)nstall or (u)pdate?", "install")?
         .to_lowercase();
 
-    let latest_version = get_latest_version().await?;
+    let client = Client::new();
+    let latest_version = get_latest_version(&client).await?;
     println!("Latest version: {}", latest_version);
 
     let (download_url, install_path) = if cfg!(target_os = "windows") {
@@ -32,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         stop_service()?;
 
         println!("Updating binary...");
-        update_binary(&download_url, &install_path).await?;
+        update_binary(&client, &download_url, &install_path).await?;
 
         println!("Starting service...");
         start_service()?;
@@ -44,8 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         println!("Downloading binary...");
-        let response = reqwest::get(&download_url).await?;
-        let content = response.bytes().await?;
+        let content = download_file(&client, &download_url).await?;
         fs::write(&install_path, content)?;
 
         #[cfg(target_family = "unix")]
@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let should_generate_config = prompt_with_default("Do you want to generate a config.json file?", "yes")?
             .to_lowercase();
         
-        if should_generate_config == "yes" || should_generate_config == "y" {
+        if should_generate_config.starts_with('y') {
             println!("Generating config.json...");
             let config = generate_config()?;
         
@@ -76,11 +76,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let should_install_service = prompt_with_default("Do you want to install an autostart service?", "yes")?
             .to_lowercase();
         
-        if should_install_service == "yes" || should_install_service == "y" {
+        if should_install_service.starts_with('y') {
             #[cfg(target_os = "windows")]
             create_windows_service(&install_path)?;
-
-            #[cfg(not(target_os = "windows"))]
+        
+            #[cfg(target_family = "unix")]
             create_linux_service(&install_path)?;
         } else {
             println!("Skipping service installation.");
@@ -95,9 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn get_latest_version() -> Result<String, Box<dyn std::error::Error>> {
+async fn get_latest_version(client: &Client) -> Result<String, Box<dyn std::error::Error>> {
     let url = "https://api.github.com/repos/0xGingi/audiobookshelf-discord-rpc/releases/latest";
-    let client = reqwest::Client::new();
     let resp = client.get(url)
         .header("User-Agent", "Audiobookshelf-Discord-RPC-Installer")
         .send()
@@ -107,14 +106,12 @@ async fn get_latest_version() -> Result<String, Box<dyn std::error::Error>> {
         return Err(format!("GitHub API request failed with status: {}", resp.status()).into());
     }
 
-    let body = resp.text().await?;
+    let json: serde_json::Value = resp.json().await?;
 
-    let json: serde_json::Value = serde_json::from_str(&body)?;
-
-    match json.get("tag_name") {
-        Some(tag) => Ok(tag.as_str().unwrap_or_default().to_string()),
-        None => Err("No tag_name found in the response".into()),
-    }
+    json.get("tag_name")
+        .and_then(|tag| tag.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No tag_name found in the response".into())
 }
 
 fn generate_config() -> Result<serde_json::Value, io::Error> {
@@ -125,8 +122,7 @@ fn generate_config() -> Result<serde_json::Value, io::Error> {
     let audiobookshelf_user_id = prompt("Audiobookshelf User Name")?;
     let default_discord_client_id = "1283070638088650752";
     let discord_client_id = prompt_with_default("Discord Client ID", default_discord_client_id)?;
-
-
+    
     Ok(json!({
         "audiobookshelfUrl": audiobookshelf_url,
         "audiobookshelfToken": audiobookshelf_token,
@@ -162,30 +158,33 @@ fn create_windows_service(install_path: &PathBuf) -> Result<(), Box<dyn std::err
 
     let task_name = "AudiobookshelfDiscordRPC";
     let task_program = install_path.display().to_string();
-    let task_arguments = format!("-c \"{}\"", install_path.with_file_name("config.json").display());
+    
+    let config_path_buf = install_path.with_file_name("config.json");
+    let config_path_display = config_path_buf.display();
+    
+    let task_arguments = format!("-c \"{}\"", config_path_display);
 
-    let powershell_args = &[
-        "-Command",
-        &format!(
-            "$action = New-ScheduledTaskAction -Execute '{}' -Argument '{}'; $trigger = New-ScheduledTaskTrigger -AtLogon; $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest; Register-ScheduledTask -TaskName '{}' -Action $action -Trigger $trigger -Principal $principal -Force; Start-ScheduledTask -TaskName '{}'",
-            task_program,
-            task_arguments,
-            task_name,
-            task_name
-        ),
-    ];
-
-    let powershell_command = format!("powershell {}", powershell_args[1]);
+    let powershell_command = format!(
+        "$action = New-ScheduledTaskAction -Execute '{}' -Argument '{}'; \
+         $trigger = New-ScheduledTaskTrigger -AtLogon; \
+         $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest; \
+         Register-ScheduledTask -TaskName '{}' -Action $action -Trigger $trigger -Principal $principal -Force; \
+         Start-ScheduledTask -TaskName '{}'",
+        task_program,
+        task_arguments,
+        task_name,
+        task_name
+    );
 
     let output = Command::new("powershell")
-        .args(powershell_args)
+        .args(&["-Command", &powershell_command])
         .output()?;
 
     if output.status.success() {
         println!("Windows Task Scheduler task created and started successfully.");
     } else {
         println!("Failed to create or start Windows Task Scheduler task.");
-        println!("PowerShell command output: {}", String::from_utf8_lossy(&output.stderr));
+        println!("PowerShell error: {}", String::from_utf8_lossy(&output.stderr));
     }
 
     Ok(())
@@ -211,21 +210,26 @@ WantedBy=default.target
         install_path.with_file_name("config.json").display(),
     );
 
-    let service_path = PathBuf::from(std::env::var("HOME")?).join(".config").join("systemd").join("user").join("audiobookshelf-discord-rpc.service");
-    fs::create_dir_all(service_path.parent().unwrap())?;
+    let config_dir = PathBuf::from(std::env::var("HOME")?).join(".config").join("systemd").join("user");
+    let service_path = config_dir.join("audiobookshelf-discord-rpc.service");
+    fs::create_dir_all(&config_dir)?;
     fs::write(&service_path, service_content)?;
 
-    Command::new("systemctl").args(&["--user", "daemon-reload"]).status()?;
-    Command::new("systemctl").args(&["--user", "enable", "--now", "audiobookshelf-discord-rpc"]).status()?;
+    Command::new("systemctl")
+        .args(&["--user", "daemon-reload"])
+        .status()?;
+    Command::new("systemctl")
+        .args(&["--user", "enable", "--now", "audiobookshelf-discord-rpc"])
+        .status()?;
 
     println!("Linux systemd service created and started successfully.");
     Ok(())
 }
 
 fn wait_for_key_press() {
-    println!("Press any key to exit...");
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).expect("Failed to read line");
+    println!("Press Enter to exit...");
+    let mut _input = String::new();
+    let _ = io::stdin().read_line(&mut _input);
 }
 
 fn stop_service() -> Result<(), Box<dyn std::error::Error>> {
@@ -264,18 +268,26 @@ fn start_service() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn update_binary(download_url: &str, install_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let response = reqwest::get(download_url).await?;
-    let content = response.bytes().await?;
+async fn update_binary(client: &Client, download_url: &str, install_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let content = download_file(client, download_url).await?;
     fs::write(install_path, content)?;
 
     #[cfg(target_family = "unix")]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(install_path)?.permissions();
+        let mut perms = fs::metadata(&install_path)?.permissions();
         perms.set_mode(0o755);
         fs::set_permissions(install_path, perms)?;
     }
 
     Ok(())
+}
+
+async fn download_file(client: &Client, url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let response = client.get(url).send().await?;
+    if !response.status().is_success() {
+        return Err(format!("Failed to download file: HTTP {}", response.status()).into());
+    }
+    let bytes = response.bytes().await?;
+    Ok(bytes.to_vec())
 }
