@@ -4,10 +4,22 @@ use std::path::PathBuf;
 use reqwest::Client;
 use serde_json::json;
 use std::process::Command;
+use serde_json::Value;
+
+const CURRENT_INSTALLER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Audiobookshelf Discord RPC Installer/Updater");
+
+    let current_installer_version = format!("installer-v{}", CURRENT_INSTALLER_VERSION);
+    let client = Client::new();
+    let latest_installer_version = get_latest_installer_version(&client).await?;
+
+    if latest_installer_version != current_installer_version {
+        println!("A new version of the installer is available: {}", latest_installer_version);
+        println!("Please download the latest version from https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/tag/{}", latest_installer_version);
+    }
 
     let action = prompt_with_default("Do you want to (i)nstall or (u)pdate?", "install")?
         .to_lowercase();
@@ -290,4 +302,25 @@ async fn download_file(client: &Client, url: &str) -> Result<Vec<u8>, Box<dyn st
     }
     let bytes = response.bytes().await?;
     Ok(bytes.to_vec())
+}
+
+async fn get_latest_installer_version(client: &Client) -> Result<String, Box<dyn std::error::Error>> {
+    let url = "https://api.github.com/repos/0xGingi/audiobookshelf-discord-rpc/releases";
+    let resp = client.get(url)
+        .header("User-Agent", "Audiobookshelf-Discord-RPC-Installer")
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API request failed with status: {}", resp.status()).into());
+    }
+
+    let releases: Vec<Value> = resp.json().await?;
+    let latest_installer_release = releases.iter()
+        .filter_map(|release| release.get("tag_name").and_then(Value::as_str))
+        .filter(|tag| tag.starts_with("installer-v"))
+        .max()
+        .ok_or_else(|| Box::<dyn std::error::Error>::from("No installer release found"))?;
+
+    Ok(latest_installer_release.to_string())
 }
