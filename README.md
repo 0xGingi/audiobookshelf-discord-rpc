@@ -9,7 +9,7 @@ Shows Book Name, Author, Duration (Updated every 15 seconds), and Cover Art
 
 * The Installer now has an update feature, just press u and let it do its thing!
 
-![screenshot-2024-09-13-16-14-18](https://github.com/user-attachments/assets/fd999961-93f8-4770-b824-af400e38352b)
+![image](https://github.com/user-attachments/assets/2354b157-3b54-4b4b-8ab3-fa7d7f64fa56)
 
 
 ## Run
