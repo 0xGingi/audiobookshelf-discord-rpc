@@ -7,6 +7,7 @@ use discord_rich_presence::{activity, DiscordIpcClient, DiscordIpc};
 use reqwest::Client;
 use url::Url;
 use std::env;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -147,6 +148,14 @@ async fn set_activity(
 
     let cover_url = get_cover_path(client, config, book_name, author).await?;
     let duration_str = format!("{} / {}", format_time(current_time), total_time);
+
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let start_time = now - current_time as i64;
+    let end_time = start_time + duration as i64;
+
     let activity = activity::Activity::new()
         .details(book_name)
         .state(author)
@@ -154,6 +163,11 @@ async fn set_activity(
             activity::Assets::new()
                 .large_image(&cover_url)
                 .large_text(&duration_str),
+        )
+        .timestamps(
+            activity::Timestamps::new()
+                .start(start_time)
+                .end(end_time)
         )
         .activity_type(activity::ActivityType::Listening);
 
