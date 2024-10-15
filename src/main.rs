@@ -123,6 +123,12 @@ async fn set_activity(
     let duration = session["duration"].as_f64().ok_or("Missing duration")?;
     let total_time = format_time(duration);
 
+    let genres = session["mediaMetadata"]["genres"]
+    .as_array()
+    .and_then(|arr| arr.get(0))
+    .and_then(Value::as_str)
+    .unwrap_or("Unknown Genre");
+
     if current_book.as_ref().map_or(true, |book| book.name != book_name) {
         *current_book = Some(Book {
             name: book_name.to_string(),
@@ -162,7 +168,7 @@ async fn set_activity(
         .assets(
             activity::Assets::new()
                 .large_image(&cover_url)
-                .large_text(&duration_str),
+                .large_text(genres),
         )
         .timestamps(
             activity::Timestamps::new()
