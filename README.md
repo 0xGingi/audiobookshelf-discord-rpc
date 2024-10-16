@@ -3,8 +3,6 @@ Displays what you're listening to on audiobookshelf on discord!
 
 Shows Book Name, Author, Duration, Genres, and Cover Art
 
-* Now Rewritten in Rust! [You can find the NodeJS Branch here](https://github.com/0xGingi/audiobookshelf-discord-rpc/tree/Javascript)
-
 * Note: This will display what you're listening to on any device but you must run this program on a computer with discord installed!
 
 * The Installer now has an update feature, just press u and let it do its thing!
