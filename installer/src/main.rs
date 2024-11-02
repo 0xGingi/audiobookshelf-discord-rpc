@@ -136,10 +136,10 @@ fn generate_config() -> Result<serde_json::Value, io::Error> {
     let discord_client_id = prompt_with_default("Discord Client ID", default_discord_client_id)?;
     
     Ok(json!({
-        "audiobookshelfUrl": audiobookshelf_url,
-        "audiobookshelfToken": audiobookshelf_token,
-        "audiobookshelfUserId": audiobookshelf_user_id,
-        "discordClientId": discord_client_id
+        "discord_client_id": discord_client_id,
+        "audiobookshelf_url": audiobookshelf_url,
+        "audiobookshelf_token": audiobookshelf_token,
+        "audiobookshelf_user_id": audiobookshelf_user_id
     }))
 }
 
