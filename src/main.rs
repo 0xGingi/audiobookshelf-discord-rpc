@@ -162,14 +162,9 @@ async fn set_activity(
     let start_time = now - current_time as i64;
     let end_time = start_time + duration as i64;
 
-    let activity = activity::Activity::new()
+    let mut activity_builder = activity::Activity::new()
         .details(book_name)
         .state(author)
-        .assets(
-            activity::Assets::new()
-                .large_image(&cover_url)
-                .large_text(genres),
-        )
         .timestamps(
             activity::Timestamps::new()
                 .start(start_time)
@@ -177,7 +172,17 @@ async fn set_activity(
         )
         .activity_type(activity::ActivityType::Listening);
 
-    discord.set_activity(activity)?;
+    let cover_url_owned = cover_url.map(|url| url.to_string());
+
+    if let Some(ref url) = cover_url_owned {
+        activity_builder = activity_builder.assets(
+            activity::Assets::new()
+                .large_image(url)
+                .large_text(genres)
+        );
+    }
+
+    discord.set_activity(activity_builder)?;
     Ok(())
 }
 
@@ -194,26 +199,46 @@ async fn get_cover_path(
     config: &Config,
     title: &str,
     author: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let url = Url::parse_with_params(
-        &format!("{}/api/search/covers", config.audiobookshelf_url),
-        &[("title", title), ("author", author), ("provider", "audible")],
-    )?;
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let providers = vec![
+        "audible",
+        "google",
+        "audible.jp",
+        "openlibrary", 
+        "itunes",
+        "audible.ca", 
+        "audible.uk", 
+        "audible.au",
+        "audible.fr", 
+        "audible.de", 
+        "audible.it",
+        "audible.in", 
+        "audible.es", 
+        "fantlab"
+    ];
 
-    let resp = client
-        .get(url)
-        .bearer_auth(&config.audiobookshelf_token)
-        .send()
-        .await?
-        .json::<Value>()
-        .await?;
+    for provider in providers {
+        let url = Url::parse_with_params(
+            &format!("{}/api/search/covers", config.audiobookshelf_url),
+            &[("title", title), ("author", author), ("provider", provider)],
+        )?;
 
-    let results = resp["results"].as_array().ok_or("No cover results found")?;
-    if let Some(cover_url) = results.get(0).and_then(Value::as_str) {
-        Ok(cover_url.to_string())
-    } else {
-        Err("No valid cover URL found".into())
+        let resp = client
+            .get(url)
+            .bearer_auth(&config.audiobookshelf_token)
+            .send()
+            .await?
+            .json::<Value>()
+            .await?;
+
+        if let Some(results) = resp["results"].as_array() {
+            if let Some(cover_url) = results.get(0).and_then(Value::as_str) {
+                return Ok(Some(cover_url.to_string()));
+            }
+        }
     }
+
+    Ok(None)
 }
 
 async fn check_for_update(client: &Client) -> Result<Option<String>, Box<dyn std::error::Error>> {
