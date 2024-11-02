@@ -13,16 +13,16 @@ Shows Book Name, Author, Duration, Genres, and Cover Art
 ## Run
 
 ### Windows
-* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.3.0/audiobookshelf-discord-rpc-installer.exe)
+* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.3.1/audiobookshelf-discord-rpc-installer.exe)
 * **Run the installer as admin to have the autostart service** 
 * Generate your config file
 * Create the startup task
 * audiobookshelf-discord-rpc should now be started and will run on boot
 * Files are located at %localappdata%/AudiobookshelfDiscordRPC & Service is created with Task Scheduler
 ### Linux
-* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.3.0/audiobookshelf-discord-rpc-installer)
+* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.3.1/audiobookshelf-discord-rpc-installer)
 ```
-./audiobookshelf-discord-rpc-installer-linux
+./audiobookshelf-discord-rpc-installer
 ```
 * Generate your config file
 * Create the systemd service (runs as user)
