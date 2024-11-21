@@ -1,9 +1,9 @@
+use discord_rich_presence::{activity, DiscordIpcClient, DiscordIpc};
+use futures::future::join_all;
 use serde::Deserialize;
-use serde_json::Value;
 use std::fs;
 use std::time::Duration;
 use tokio::time;
-use discord_rich_presence::{activity, DiscordIpcClient, DiscordIpc};
 use reqwest::Client;
 use url::Url;
 use std::env;
@@ -28,6 +28,25 @@ struct Book {
 #[derive(Debug, Deserialize)]
 struct ReleaseInfo {
     tag_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListeningSessionsResponse {
+    sessions: Vec<Session>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Session {
+    displayTitle: String,
+    displayAuthor: String,
+    currentTime: f64,
+    duration: f64,
+    mediaMetadata: MediaMetadata,
+}
+
+#[derive(Debug, Deserialize)]
+struct MediaMetadata {
+    genres: Vec<String>,
 }
 
 #[tokio::main]
@@ -106,33 +125,28 @@ async fn set_activity(
         .bearer_auth(&config.audiobookshelf_token)
         .send()
         .await?
-        .json::<Value>()
+        .json::<ListeningSessionsResponse>()
         .await?;
 
-    let sessions = resp["sessions"].as_array().ok_or("No sessions found")?;
-    if sessions.is_empty() {
+    if resp.sessions.is_empty() {
         println!("No active listening session");
         discord.clear_activity()?;
         return Ok(());
     }
 
-    let session = &sessions[0];
-    let book_name = session["displayTitle"].as_str().ok_or("Missing display title")?;
-    let author = session["displayAuthor"].as_str().ok_or("Missing author")?;
-    let current_time = session["currentTime"].as_f64().ok_or("Missing current time")?;
-    let duration = session["duration"].as_f64().ok_or("Missing duration")?;
+    let session = &resp.sessions[0];
+    let book_name = &session.displayTitle;
+    let author = &session.displayAuthor;
+    let current_time = session.currentTime;
+    let duration = session.duration;
     let total_time = format_time(duration);
 
-    let genres = session["mediaMetadata"]["genres"]
-    .as_array()
-    .and_then(|arr| arr.get(0))
-    .and_then(Value::as_str)
-    .unwrap_or("Unknown Genre");
+    let genres = session.mediaMetadata.genres.get(0).map(|s| s.as_str()).unwrap_or("Unknown Genre");
 
-    if current_book.as_ref().map_or(true, |book| book.name != book_name) {
+    if current_book.as_ref().map_or(true, |book| book.name != *book_name) {
         *current_book = Some(Book {
-            name: book_name.to_string(),
-            author: author.to_string(),
+            name: book_name.clone(),
+            author: author.clone(),
         });
         *last_known_time = None;
         *is_paused = false;
@@ -155,9 +169,8 @@ async fn set_activity(
     let cover_url = get_cover_path(client, config, book_name, author).await?;
     let duration_str = format!("{} / {}", format_time(current_time), total_time);
 
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
         .as_secs() as i64;
     let start_time = now - current_time as i64;
     let end_time = start_time + duration as i64;
@@ -172,9 +185,7 @@ async fn set_activity(
         )
         .activity_type(activity::ActivityType::Listening);
 
-    let cover_url_owned = cover_url.map(|url| url.to_string());
-
-    if let Some(ref url) = cover_url_owned {
+    if let Some(ref url) = cover_url {
         activity_builder = activity_builder.assets(
             activity::Assets::new()
                 .large_image(url)
@@ -204,41 +215,56 @@ async fn get_cover_path(
         "audible",
         "google",
         "audible.jp",
-        "openlibrary", 
+        "openlibrary",
         "itunes",
-        "audible.ca", 
-        "audible.uk", 
+        "audible.ca",
+        "audible.uk",
         "audible.au",
-        "audible.fr", 
-        "audible.de", 
+        "audible.fr",
+        "audible.de",
         "audible.it",
-        "audible.in", 
-        "audible.es", 
-        "fantlab"
+        "audible.in",
+        "audible.es",
+        "fantlab",
     ];
 
-    for provider in providers {
-        let url = Url::parse_with_params(
-            &format!("{}/api/search/covers", config.audiobookshelf_url),
-            &[("title", title), ("author", author), ("provider", provider)],
-        )?;
-
-        let resp = client
-            .get(url)
-            .bearer_auth(&config.audiobookshelf_token)
-            .send()
-            .await?
-            .json::<Value>()
-            .await?;
-
-        if let Some(results) = resp["results"].as_array() {
-            if let Some(cover_url) = results.get(0).and_then(Value::as_str) {
-                return Ok(Some(cover_url.to_string()));
+    let futures = providers.iter().map(|provider| {
+        let client = client.clone();
+        let config = config.clone();
+        let title = title.to_string();
+        let author = author.to_string();
+        async move {
+            let url = Url::parse_with_params(
+                &format!("{}/api/search/covers", config.audiobookshelf_url),
+                &[("title", title.as_str()), ("author", author.as_str()), ("provider", *provider)],
+            )?;
+            let resp: CoverResponse = client
+                .get(url)
+                .bearer_auth(&config.audiobookshelf_token)
+                .send()
+                .await?
+                .json()
+                .await?;
+            if let Some(cover_url) = resp.results.get(0) {
+                return Ok(Some(cover_url.clone()));
             }
+            Ok(None)
+        }
+    });
+
+    let results: Vec<Result<Option<String>, Box<dyn std::error::Error>>> = join_all(futures).await;
+    for result in results {
+        if let Ok(Some(url)) = result {
+            return Ok(Some(url));
         }
     }
 
     Ok(None)
+}
+
+#[derive(Debug, Deserialize)]
+struct CoverResponse {
+    results: Vec<String>,
 }
 
 async fn check_for_update(client: &Client) -> Result<Option<String>, Box<dyn std::error::Error>> {
