@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             eprintln!("Error setting activity: {}", e);
         }
-        time::sleep(Duration::from_secs(15)).await;
+        time::sleep(Duration::from_secs(5)).await;
     }
 }
 
@@ -172,8 +172,10 @@ async fn set_activity(
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)?
         .as_secs() as i64;
-    let start_time = now - current_time as i64;
-    let end_time = start_time + duration as i64;
+
+        let start_time = now - current_time as i64;
+        let end_time = start_time + duration as i64;
+        
 
     let mut activity_builder = activity::Activity::new()
         .details(book_name)
