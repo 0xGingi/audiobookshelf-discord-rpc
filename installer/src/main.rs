@@ -131,7 +131,6 @@ fn generate_config() -> Result<serde_json::Value, io::Error> {
 
     let audiobookshelf_url = prompt("Audiobookshelf URL (Don't forget to include port if not reverse proxying)")?;
     let audiobookshelf_token = prompt("Audiobookshelf API Key (Find this when clicking on your user in settings)")?;
-    let audiobookshelf_user_id = prompt("Audiobookshelf User Name")?;
     let default_discord_client_id = "1283070638088650752";
     let discord_client_id = prompt_with_default("Discord Client ID", default_discord_client_id)?;
     
@@ -139,7 +138,6 @@ fn generate_config() -> Result<serde_json::Value, io::Error> {
         "discord_client_id": discord_client_id,
         "audiobookshelf_url": audiobookshelf_url,
         "audiobookshelf_token": audiobookshelf_token,
-        "audiobookshelf_user_id": audiobookshelf_user_id
     }))
 }
 
