@@ -210,10 +210,14 @@ fn create_linux_service(install_path: &PathBuf) -> Result<(), Box<dyn std::error
         r#"[Unit]
 Description=Audiobookshelf Discord RPC
 After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
+Type=simple
 ExecStart={} -c {}
 Restart=always
+RestartSec=10
 
 [Install]
 WantedBy=default.target
