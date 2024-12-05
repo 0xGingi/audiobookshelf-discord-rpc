@@ -8,6 +8,8 @@ use reqwest::Client;
 use url::Url;
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
+use log::{info, error};
+use env_logger;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -50,25 +52,27 @@ struct MediaMetadata {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
     let client = Client::new();
 
     if let Some(latest_version) = check_for_update(&client).await? {
-        println!(
+        info!(
             "A new version is available: {}. You're currently running version {}.",
             latest_version, CURRENT_VERSION
         );
-        println!("Please re-run the installer or visit https://github.com/0xGingi/audiobookshelf-discord-rpc/releases to download the latest version.");
+        info!("Please re-run the installer or visit https://github.com/0xGingi/audiobookshelf-discord-rpc/releases to download the latest version.");
     } else {
-        println!("You're running the latest version: {}", CURRENT_VERSION);
+        info!("You're running the latest version: {}", CURRENT_VERSION);
     }
 
     let config_file = parse_args()?;
-    println!("Using config file: {}", config_file);
+    info!("Using config file: {}", config_file);
 
     let config = load_config(&config_file)?;
     let mut discord = DiscordIpcClient::new(&config.discord_client_id)?;
     discord.connect()?;
-    println!("Audiobookshelf Discord RPC Connected!");
+    info!("Audiobookshelf Discord RPC Connected!");
 
     let mut last_known_time: Option<f64> = None;
     let mut is_paused = false;
@@ -85,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         {
-            eprintln!("Error setting activity: {}", e);
+            error!("Error setting activity: {}", e);
         }
         time::sleep(Duration::from_secs(15)).await;
     }
@@ -129,7 +133,7 @@ async fn set_activity(
         .await?;
 
     if resp.sessions.is_empty() {
-        println!("No active listening session");
+        info!("No active listening session");
         discord.clear_activity()?;
         return Ok(());
     }
@@ -153,7 +157,7 @@ async fn set_activity(
     if let Some(last_time) = last_known_time {
         if (current_time - *last_time).abs() < f64::EPSILON {
             if !*is_paused {
-                println!("Book paused. Clearing activity.");
+                info!("Book paused. Clearing activity.");
                 discord.clear_activity()?;
                 *is_paused = true;
             }
@@ -165,6 +169,8 @@ async fn set_activity(
     *is_paused = false;
 
     let cover_url = get_cover_path(client, config, book_name, author).await?;
+
+    // Duration will always be a little out of sync with ABS - This is due to the API not being updated in real time
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)?
@@ -186,9 +192,6 @@ async fn set_activity(
                 .end(end_time)
         )
         .activity_type(activity::ActivityType::Listening);
-
-        println!("Setting activity with timestamps: start={}, end={}", start_time, end_time);
-
 
     if let Some(ref url) = cover_url {
         activity_builder = activity_builder.assets(
