@@ -16,13 +16,11 @@ struct Config {
     discord_client_id: String,
     audiobookshelf_url: String,
     audiobookshelf_token: String,
-    audiobookshelf_user_id: String,
 }
 
 #[derive(Debug)]
 struct Book {
     name: String,
-    author: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +34,7 @@ struct ListeningSessionsResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
 struct Session {
     displayTitle: String,
     displayAuthor: String,
@@ -88,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             eprintln!("Error setting activity: {}", e);
         }
-        time::sleep(Duration::from_secs(5)).await;
+        time::sleep(Duration::from_secs(15)).await;
     }
 }
 
@@ -111,6 +110,7 @@ fn load_config(config_file: &str) -> Result<Config, Box<dyn std::error::Error>> 
     Ok(config)
 }
 
+#[allow(non_snake_case)]
 async fn set_activity(
     client: &Client,
     config: &Config,
@@ -139,14 +139,12 @@ async fn set_activity(
     let author = &session.displayAuthor;
     let current_time = session.currentTime;
     let duration = session.duration;
-    let total_time = format_time(duration);
 
     let genres = session.mediaMetadata.genres.get(0).map(|s| s.as_str()).unwrap_or("Unknown Genre");
 
     if current_book.as_ref().map_or(true, |book| book.name != *book_name) {
         *current_book = Some(Book {
             name: book_name.clone(),
-            author: author.clone(),
         });
         *last_known_time = None;
         *is_paused = false;
@@ -167,15 +165,17 @@ async fn set_activity(
     *is_paused = false;
 
     let cover_url = get_cover_path(client, config, book_name, author).await?;
-    let duration_str = format!("{} / {}", format_time(current_time), total_time);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)?
         .as_secs() as i64;
 
-        let start_time = now - current_time as i64;
-        let end_time = start_time + duration as i64;
-        
+        let current_position = current_time.max(0.0) as i64;
+        let total_duration = duration.max(0.0) as i64;
+    
+        let start_time = now.saturating_sub(current_position);
+        let end_time = now.saturating_add(total_duration.saturating_sub(current_position));
+            
 
     let mut activity_builder = activity::Activity::new()
         .details(book_name)
@@ -187,6 +187,9 @@ async fn set_activity(
         )
         .activity_type(activity::ActivityType::Listening);
 
+        println!("Setting activity with timestamps: start={}, end={}", start_time, end_time);
+
+
     if let Some(ref url) = cover_url {
         activity_builder = activity_builder.assets(
             activity::Assets::new()
@@ -197,14 +200,6 @@ async fn set_activity(
 
     discord.set_activity(activity_builder)?;
     Ok(())
-}
-
-fn format_time(seconds: f64) -> String {
-    let total_seconds = seconds as u64;
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let remaining_seconds = total_seconds % 60;
-    format!("{:02}:{:02}:{:02}", hours, minutes, remaining_seconds)
 }
 
 async fn get_cover_path(
@@ -232,7 +227,7 @@ async fn get_cover_path(
 
     let futures = providers.iter().map(|provider| {
         let client = client.clone();
-        let config = config.clone();
+        let config = config;
         let title = title.to_string();
         let author = author.to_string();
         async move {
