@@ -133,11 +133,15 @@ fn generate_config() -> Result<serde_json::Value, io::Error> {
     let audiobookshelf_token = prompt("Audiobookshelf API Key (Find this when clicking on your user in settings)")?;
     let default_discord_client_id = "1283070638088650752";
     let discord_client_id = prompt_with_default("Discord Client ID", default_discord_client_id)?;
+    let show_chapters = prompt_with_default("Show chapters instead of genres? (yes/no)", "no")?
+        .to_lowercase()
+        .starts_with('y');
     
     Ok(json!({
         "discord_client_id": discord_client_id,
         "audiobookshelf_url": audiobookshelf_url,
         "audiobookshelf_token": audiobookshelf_token,
+        "show_chapters": show_chapters,
     }))
 }
 

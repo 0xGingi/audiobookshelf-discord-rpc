@@ -18,6 +18,7 @@ struct Config {
     discord_client_id: String,
     audiobookshelf_url: String,
     audiobookshelf_token: String,
+    show_chapters: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -43,11 +44,41 @@ struct Session {
     currentTime: f64,
     duration: f64,
     mediaMetadata: MediaMetadata,
+    libraryItemId: String,
+    chapters: Option<Vec<Chapter>>,
+    libraryItem: Option<LibraryItem>,
 }
 
 #[derive(Debug, Deserialize)]
 struct MediaMetadata {
     genres: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Chapter {
+    title: String,
+    start: f64,
+    end: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct LibraryItem {
+    media: Option<Media>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Media {
+    chapters: Option<Vec<Chapter>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LibraryItemResponse {
+    media: MediaResponse,
+}
+
+#[derive(Debug, Deserialize)]
+struct MediaResponse {
+    chapters: Vec<Chapter>,
 }
 
 #[tokio::main]
@@ -123,9 +154,14 @@ async fn set_activity(
     is_paused: &mut bool,
     current_book: &mut Option<Book>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let url = format!("{}/api/me/listening-sessions?itemsPerPage=1", config.audiobookshelf_url);
+
+    let sessions_url = format!(
+        "{}/api/me/listening-sessions?itemsPerPage=1", 
+        config.audiobookshelf_url
+    );
+    
     let resp = client
-        .get(&url)
+        .get(&sessions_url)
         .bearer_auth(&config.audiobookshelf_token)
         .send()
         .await?
@@ -139,12 +175,39 @@ async fn set_activity(
     }
 
     let session = &resp.sessions[0];
+    
+    let library_item_url = format!(
+        "{}/api/items/{}?include=chapters", 
+        config.audiobookshelf_url,
+        session.libraryItemId
+    );
+    
+    let library_item: LibraryItemResponse = client
+        .get(&library_item_url)
+        .bearer_auth(&config.audiobookshelf_token)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let current_time = session.currentTime;
+    let genres = session.mediaMetadata.genres.get(0).map(|s| s.as_str()).unwrap_or("Unknown Genre");
+    
+    let large_text = if config.show_chapters.unwrap_or(false) {
+        if let Some(current_chapter) = library_item.media.chapters.iter().find(|ch| {
+            current_time >= ch.start && current_time <= ch.end
+        }) {
+            format!("Chapter {}", current_chapter.title)
+        } else {
+            genres.to_string()
+        }
+    } else {
+        genres.to_string()
+    };
+
     let book_name = &session.displayTitle;
     let author = &session.displayAuthor;
-    let current_time = session.currentTime;
     let duration = session.duration;
-
-    let genres = session.mediaMetadata.genres.get(0).map(|s| s.as_str()).unwrap_or("Unknown Genre");
 
     if current_book.as_ref().map_or(true, |book| book.name != *book_name) {
         *current_book = Some(Book {
@@ -197,11 +260,12 @@ async fn set_activity(
         activity_builder = activity_builder.assets(
             activity::Assets::new()
                 .large_image(url)
-                .large_text(genres)
+                .large_text(&large_text)
         );
     }
 
     discord.set_activity(activity_builder)?;
+
     Ok(())
 }
 

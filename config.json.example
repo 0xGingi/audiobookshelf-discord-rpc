@@ -1,5 +1,6 @@
 {
     "discord_client_id": "1283070638088650752",
     "audiobookshelf_url": "http://localhost:PORT OR https://audiobookshelf.example.com", 
-    "audiobookshelf_token": "YOUR_AUDIOBOOKSHELF_API_TOKEN"
+    "audiobookshelf_token": "YOUR_AUDIOBOOKSHELF_API_TOKEN",
+    "show_chapters": true
 }
