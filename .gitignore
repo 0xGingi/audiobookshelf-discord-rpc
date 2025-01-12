@@ -1,3 +1,5 @@
 config.json
 target/
 installer/target/
+release-windows/
+build-windows.sh
