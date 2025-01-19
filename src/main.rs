@@ -197,7 +197,11 @@ async fn set_activity(
         if let Some(current_chapter) = library_item.media.chapters.iter().find(|ch| {
             current_time >= ch.start && current_time <= ch.end
         }) {
-            format!("Chapter {}", current_chapter.title)
+            if current_chapter.title.to_lowercase().contains("chapter") {
+                current_chapter.title.to_string()
+            } else {
+                format!("Chapter {}", current_chapter.title)
+            }
         } else {
             genres.to_string()
         }
