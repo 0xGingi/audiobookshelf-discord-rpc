@@ -12,6 +12,7 @@ use log::{info, error};
 use env_logger;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TIME_OFFSET_CORRECTION: f64 = -16.0;
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -81,6 +82,19 @@ struct MediaResponse {
     chapters: Vec<Chapter>,
 }
 
+#[derive(Debug)]
+struct PlaybackState {
+    last_api_time: SystemTime,
+    last_position: f64,
+    is_playing: bool,
+}
+
+#[derive(Debug)]
+struct TimingInfo {
+    last_api_time: Option<SystemTime>,
+    last_position: Option<f64>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -105,18 +119,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     discord.connect()?;
     info!("Audiobookshelf Discord RPC Connected!");
 
-    let mut last_known_time: Option<f64> = None;
-    let mut is_paused = false;
+    let mut playback_state = PlaybackState {
+        last_api_time: SystemTime::now(),
+        last_position: 0.0,
+        is_playing: false,
+    };
     let mut current_book: Option<Book> = None;
+    let mut timing_info = TimingInfo {
+        last_api_time: None,
+        last_position: None,
+    };
 
     loop {
         if let Err(e) = set_activity(
             &client,
             &config,
             &mut discord,
-            &mut last_known_time,
-            &mut is_paused,
+            &mut playback_state,
             &mut current_book,
+            &mut timing_info,
         )
         .await
         {
@@ -150,9 +171,9 @@ async fn set_activity(
     client: &Client,
     config: &Config,
     discord: &mut DiscordIpcClient,
-    last_known_time: &mut Option<f64>,
-    is_paused: &mut bool,
+    playback_state: &mut PlaybackState,
     current_book: &mut Option<Book>,
+    timing_info: &mut TimingInfo,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     let sessions_url = format!(
@@ -217,38 +238,35 @@ async fn set_activity(
         *current_book = Some(Book {
             name: book_name.clone(),
         });
-        *last_known_time = None;
-        *is_paused = false;
+        *playback_state = PlaybackState {
+            last_api_time: SystemTime::now(),
+            last_position: 0.0,
+            is_playing: false,
+        };
     }
 
-    if let Some(last_time) = last_known_time {
-        if (current_time - *last_time).abs() < f64::EPSILON {
-            if !*is_paused {
-                info!("Book paused. Clearing activity.");
-                discord.clear_activity()?;
-                *is_paused = true;
-            }
-            return Ok(());
-        }
-    }
+    let now = SystemTime::now();
+    let current_position = if playback_state.is_playing {
+        let elapsed = now
+            .duration_since(playback_state.last_api_time)
+            .unwrap_or(Duration::from_secs(0))
+            .as_secs_f64();
+        
+        current_time + elapsed + TIME_OFFSET_CORRECTION
+    } else {
+        current_time
+    };
 
-    *last_known_time = Some(current_time);
-    *is_paused = false;
+    playback_state.last_api_time = now;
+    playback_state.last_position = current_time;
+    playback_state.is_playing = true;
 
-    let cover_url = get_cover_path(client, config, book_name, author).await?;
+    let now_secs = now.duration_since(UNIX_EPOCH)?.as_secs() as i64;
+    let current_pos = current_position.max(0.0) as i64;
+    let total_dur = duration.max(0.0) as i64;
 
-    // Duration will always be a little out of sync with ABS - This is due to the API not being updated in real time
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_secs() as i64;
-
-        let current_position = current_time.max(0.0) as i64;
-        let total_duration = duration.max(0.0) as i64;
-    
-        let start_time = now.saturating_sub(current_position);
-        let end_time = now.saturating_add(total_duration.saturating_sub(current_position));
-            
+    let start_time = now_secs.saturating_sub(current_pos);
+    let end_time = now_secs.saturating_add(total_dur.saturating_sub(current_pos));
 
     let mut activity_builder = activity::Activity::new()
         .details(book_name)
@@ -260,6 +278,8 @@ async fn set_activity(
         )
         .activity_type(activity::ActivityType::Listening);
 
+    let cover_url = get_cover_path(client, config, book_name, author).await?;
+
     if let Some(ref url) = cover_url {
         activity_builder = activity_builder.assets(
             activity::Assets::new()
@@ -269,6 +289,23 @@ async fn set_activity(
     }
 
     discord.set_activity(activity_builder)?;
+
+    if let (Some(last_time), Some(last_api_time)) = (timing_info.last_position, timing_info.last_api_time) {
+        if (current_time - last_time).abs() > f64::EPSILON {
+            let elapsed = SystemTime::now()
+                .duration_since(last_api_time)
+                .unwrap_or(Duration::from_secs(0));
+            info!(
+                "API position updated: previous={:.2}s, current={:.2}s, time since last update={:.2}s",
+                last_time,
+                current_time,
+                elapsed.as_secs_f64()
+            );
+        }
+    }
+    
+    timing_info.last_position = Some(current_time);
+    timing_info.last_api_time = Some(SystemTime::now());
 
     Ok(())
 }
