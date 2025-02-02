@@ -197,6 +197,36 @@ async fn set_activity(
 
     let session = &resp.sessions[0];
     
+    if timing_info.last_position.is_none() {
+        playback_state.is_playing = false;
+        discord.clear_activity()?;
+        timing_info.last_position = Some(session.currentTime);
+        timing_info.last_api_time = Some(SystemTime::now());
+        return Ok(());
+    }
+
+    let current_time = session.currentTime;
+    
+    if let (Some(last_time), Some(last_api_time)) = (timing_info.last_position, timing_info.last_api_time) {
+        let elapsed = SystemTime::now().duration_since(last_api_time).unwrap_or(Duration::from_secs(0));
+        if elapsed.as_secs() >= 2 && (current_time - last_time).abs() < f64::EPSILON {
+            playback_state.is_playing = false;
+            discord.clear_activity()?;
+            timing_info.last_position = Some(current_time);
+            timing_info.last_api_time = Some(SystemTime::now());
+            return Ok(());
+        } else if (current_time - last_time).abs() > f64::EPSILON {
+            playback_state.is_playing = true;
+        }
+    }
+
+    if !playback_state.is_playing {
+        discord.clear_activity()?;
+        timing_info.last_position = Some(current_time);
+        timing_info.last_api_time = Some(SystemTime::now());
+        return Ok(());
+    }
+
     let library_item_url = format!(
         "{}/api/items/{}?include=chapters", 
         config.audiobookshelf_url,
@@ -211,9 +241,10 @@ async fn set_activity(
         .json()
         .await?;
 
-    let current_time = session.currentTime;
     let genres = session.mediaMetadata.genres.get(0).map(|s| s.as_str()).unwrap_or("Unknown Genre");
     
+    let now = SystemTime::now();
+
     let large_text = if config.show_chapters.unwrap_or(false) {
         if let Some(current_chapter) = library_item.media.chapters.iter().find(|ch| {
             current_time >= ch.start && current_time <= ch.end
@@ -245,7 +276,6 @@ async fn set_activity(
         };
     }
 
-    let now = SystemTime::now();
     let current_position = if playback_state.is_playing {
         let elapsed = now
             .duration_since(playback_state.last_api_time)
@@ -257,26 +287,29 @@ async fn set_activity(
         current_time
     };
 
-    playback_state.last_api_time = now;
-    playback_state.last_position = current_time;
-    playback_state.is_playing = true;
+    let mut activity_builder = if playback_state.is_playing {
+        let now_secs = now.duration_since(UNIX_EPOCH)?.as_secs() as i64;
+        let current_pos = current_position.max(0.0) as i64;
+        let total_dur = duration.max(0.0) as i64;
 
-    let now_secs = now.duration_since(UNIX_EPOCH)?.as_secs() as i64;
-    let current_pos = current_position.max(0.0) as i64;
-    let total_dur = duration.max(0.0) as i64;
+        let start_time = now_secs.saturating_sub(current_pos);
+        let end_time = now_secs.saturating_add(total_dur.saturating_sub(current_pos));
 
-    let start_time = now_secs.saturating_sub(current_pos);
-    let end_time = now_secs.saturating_add(total_dur.saturating_sub(current_pos));
-
-    let mut activity_builder = activity::Activity::new()
-        .details(book_name)
-        .state(author)
-        .timestamps(
-            activity::Timestamps::new()
-                .start(start_time)
-                .end(end_time)
-        )
-        .activity_type(activity::ActivityType::Listening);
+        activity::Activity::new()
+            .details(book_name)
+            .state(author)
+            .timestamps(
+                activity::Timestamps::new()
+                    .start(start_time)
+                    .end(end_time)
+            )
+            .activity_type(activity::ActivityType::Listening)
+    } else {
+        activity::Activity::new()
+            .details(book_name)
+            .state(author)
+            .activity_type(activity::ActivityType::Listening)
+    };
 
     let cover_url = get_cover_path(client, config, book_name, author).await?;
 
