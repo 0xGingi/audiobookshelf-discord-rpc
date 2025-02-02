@@ -316,6 +316,12 @@ async fn get_cover_path(
     title: &str,
     author: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let search_title = if let Some(book_num) = extract_book_number(title) {
+        format!("{} {}", get_base_title(title), book_num)
+    } else {
+        get_base_title(title).to_string()
+    };
+
     let providers = vec![
         "audible",
         "google",
@@ -336,7 +342,7 @@ async fn get_cover_path(
     let futures = providers.iter().map(|provider| {
         let client = client.clone();
         let config = config;
-        let title = title.to_string();
+        let title = search_title.clone();
         let author = author.to_string();
         async move {
             let url = Url::parse_with_params(
@@ -365,6 +371,24 @@ async fn get_cover_path(
     }
 
     Ok(None)
+}
+
+fn extract_book_number(title: &str) -> Option<String> {
+    if let Some(idx) = title.find("Book ") {
+        let after_book = &title[idx + 5..];
+        if let Some(end) = after_book.find(|c: char| !c.is_numeric()) {
+            return Some(format!("Book {}", &after_book[..end]));
+        }
+    }
+    None
+}
+
+fn get_base_title(title: &str) -> &str {
+    if let Some(idx) = title.find(|c| c == ':' || c == '(') {
+        title[..idx].trim()
+    } else {
+        title.trim()
+    }
 }
 
 #[derive(Debug, Deserialize)]
