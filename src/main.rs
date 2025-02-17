@@ -12,7 +12,6 @@ use log::{info, error};
 use env_logger;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const TIME_OFFSET_CORRECTION: f64 = -16.0;
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -267,7 +266,14 @@ async fn set_activity(
             .unwrap_or(Duration::from_secs(0))
             .as_secs_f64();
         
-        (current_time + elapsed + TIME_OFFSET_CORRECTION).min(duration)
+        let adjusted_elapsed = elapsed * 0.8;
+        
+        if (current_time - timing_info.last_position.unwrap_or(0.0)).abs() > f64::EPSILON {
+            playback_state.last_api_time = now;
+            current_time
+        } else {
+            timing_info.last_position.unwrap_or(current_time) + adjusted_elapsed
+        }
     } else {
         current_time
     };
@@ -278,7 +284,7 @@ async fn set_activity(
         let total_dur = duration.max(0.0) as i64;
 
         let start_time = now_secs.saturating_sub(current_pos);
-        let end_time = now_secs.saturating_add(total_dur.saturating_sub(current_pos));
+        let end_time = start_time.saturating_add(total_dur);
 
         activity::Activity::new()
             .details(book_name)
