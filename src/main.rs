@@ -45,9 +45,7 @@ struct Session {
     currentTime: f64,
     duration: f64,
     mediaMetadata: MediaMetadata,
-    libraryItemId: String,
-    chapters: Option<Vec<Chapter>>,
-    libraryItem: Option<LibraryItem>,
+    libraryItemId: String
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,16 +61,6 @@ struct Chapter {
 }
 
 #[derive(Debug, Deserialize)]
-struct LibraryItem {
-    media: Option<Media>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Media {
-    chapters: Option<Vec<Chapter>>,
-}
-
-#[derive(Debug, Deserialize)]
 struct LibraryItemResponse {
     media: MediaResponse,
 }
@@ -85,7 +73,6 @@ struct MediaResponse {
 #[derive(Debug)]
 struct PlaybackState {
     last_api_time: SystemTime,
-    last_position: f64,
     is_playing: bool,
 }
 
@@ -121,7 +108,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut playback_state = PlaybackState {
         last_api_time: SystemTime::now(),
-        last_position: 0.0,
         is_playing: false,
     };
     let mut current_book: Option<Book> = None;
@@ -271,7 +257,6 @@ async fn set_activity(
         });
         *playback_state = PlaybackState {
             last_api_time: SystemTime::now(),
-            last_position: 0.0,
             is_playing: false,
         };
     }
@@ -282,7 +267,7 @@ async fn set_activity(
             .unwrap_or(Duration::from_secs(0))
             .as_secs_f64();
         
-        current_time + elapsed + TIME_OFFSET_CORRECTION
+        (current_time + elapsed + TIME_OFFSET_CORRECTION).min(duration)
     } else {
         current_time
     };
