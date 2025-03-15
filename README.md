@@ -19,6 +19,7 @@ Shows Book Name, Author, Duration, Genres or Chapter, and Cover Art
 * Create the startup task
 * audiobookshelf-discord-rpc should now be started and will run on boot
 * Files are located at %localappdata%/AudiobookshelfDiscordRPC & Service is created with Task Scheduler
+
 ### Linux
 * [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.4.0/audiobookshelf-discord-rpc-installer)
 ```
@@ -28,6 +29,22 @@ Shows Book Name, Author, Duration, Genres or Chapter, and Cover Art
 * Create the systemd service (runs as user)
 * audiobookshelf-discord-rpc should now be started and will run on boot
 * Executable and config.json are located at ~/.local/bin/ & systemd service is located at ~/.config/systemd/user/audiobookshelf-discord-rpc.service
+
+### Docker (Linux Only - Requires Discord Installed on system - WSL2 May Work on Windows if Discord is installed in WSL)
+* Clone the repo
+```
+git clone https://github.com/0xgingi/audiobookshelf-discord-rpc
+cd audiobookshelf-discord-rpc
+```
+* Create a config.json file
+```
+cp config/config.json.example config/config.json
+```
+* Edit the config.json file
+* Run the docker container
+```
+docker compose up -d
+```
 
 ## Get API Key (Must Be Admin)
 ![abs-api-1](https://github.com/user-attachments/assets/57a0c95d-acfc-447e-aa6a-fc8651ddca24)

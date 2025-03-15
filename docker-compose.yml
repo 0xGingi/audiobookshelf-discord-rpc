@@ -1,0 +1,9 @@
+services:
+  audiobookshelf-discord-rpc:
+    image: 0xgingi/audiobookshelf-discord-rpc:latest
+    volumes:
+      - ./config:/app/config
+      - /run/user/1000/discord-ipc-0:/run/user/1000/discord-ipc-0
+    environment:
+      - XDG_RUNTIME_DIR=/run/user/1000
+    restart: unless-stopped 
