@@ -127,20 +127,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         {
-            let mut source = e.source();
             let mut is_pipe_error = false;
-            while let Some(err) = source {
-                if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
-                    if io_err.kind() == ErrorKind::BrokenPipe || io_err.raw_os_error() == Some(232) {
-                        is_pipe_error = true;
-                        break;
-                    }
+            if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+                if io_err.kind() == ErrorKind::BrokenPipe || io_err.raw_os_error() == Some(232) || io_err.raw_os_error() == Some(32) {
+                    is_pipe_error = true;
                 }
-                source = err.source();
+            }
+
+            if !is_pipe_error {
+                let mut source = e.source();
+                while let Some(err) = source {
+                    if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+                        if io_err.kind() == ErrorKind::BrokenPipe || io_err.raw_os_error() == Some(232) || io_err.raw_os_error() == Some(32) {
+                            is_pipe_error = true;
+                            break;
+                        }
+                    }
+                    source = err.source();
+                }
             }
 
             if is_pipe_error {
                 warn!("Connection to Discord lost (pipe closed). Attempting to reconnect...");
+                if let Err(close_err) = discord.close() {
+                    error!("Error closing old Discord client (connection likely already broken): {}", close_err);
+                }
                 time::sleep(Duration::from_secs(5)).await;
                 match DiscordIpcClient::new(&config.discord_client_id) {
                     Ok(mut new_discord) => {
@@ -157,7 +168,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             } else {
-                error!("Error setting activity: {}", e); // Log other errors
+                error!("Error setting activity (not identified as pipe error): {}", e);
+                error!("Full error details: {:?}", e);
             }
         }
         time::sleep(Duration::from_secs(15)).await;
