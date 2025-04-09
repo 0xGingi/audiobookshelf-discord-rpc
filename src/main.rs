@@ -8,8 +8,9 @@ use reqwest::Client;
 use url::Url;
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
-use log::{info, error};
+use log::{info, error, warn};
 use env_logger;
+use std::io::ErrorKind;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -126,7 +127,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         {
-            error!("Error setting activity: {}", e);
+            let mut source = e.source();
+            let mut is_pipe_error = false;
+            while let Some(err) = source {
+                if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+                    if io_err.kind() == ErrorKind::BrokenPipe || io_err.raw_os_error() == Some(232) {
+                        is_pipe_error = true;
+                        break;
+                    }
+                }
+                source = err.source();
+            }
+
+            if is_pipe_error {
+                warn!("Connection to Discord lost (pipe closed). Attempting to reconnect...");
+                time::sleep(Duration::from_secs(5)).await;
+                match DiscordIpcClient::new(&config.discord_client_id) {
+                    Ok(mut new_discord) => {
+                        if let Err(connect_err) = new_discord.connect() {
+                            error!("Failed to reconnect to Discord: {}", connect_err);
+                            // Keep the old client for now, maybe add more robust handling later
+                        } else {
+                            info!("Successfully reconnected to Discord.");
+                            discord = new_discord; // Replace the old client
+                        }
+                    }
+                    Err(init_err) => {
+                        error!("Failed to create new Discord client: {}", init_err);
+                    }
+                }
+            } else {
+                error!("Error setting activity: {}", e); // Log other errors
+            }
         }
         time::sleep(Duration::from_secs(15)).await;
     }
