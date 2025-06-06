@@ -33,6 +33,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/{}/audiobookshelf-discord-rpc.exe", latest_version),
             PathBuf::from(std::env::var("LOCALAPPDATA")?).join("AudiobookshelfDiscordRPC").join("audiobookshelf-discord-rpc.exe")
         )
+    } else if cfg!(target_os = "macos") {
+        (
+            format!("https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/{}/audiobookshelf-discord-rpc-macos-arm64", latest_version),
+            PathBuf::from(std::env::var("HOME")?).join(".local").join("bin").join("audiobookshelf-discord-rpc")
+        )
     } else {
         (
             format!("https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/{}/audiobookshelf-discord-rpc-linux-x64", latest_version),
@@ -92,7 +97,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(target_os = "windows")]
             create_windows_service(&install_path)?;
         
-            #[cfg(target_family = "unix")]
+            #[cfg(target_os = "macos")]
+            create_macos_service(&install_path)?;
+        
+            #[cfg(all(target_family = "unix", not(target_os = "macos")))]
             create_linux_service(&install_path)?;
         } else {
             println!("Skipping service installation.");
@@ -204,7 +212,52 @@ fn create_windows_service(install_path: &PathBuf) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-#[cfg(target_family = "unix")]
+#[cfg(target_os = "macos")]
+fn create_macos_service(install_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Creating macOS LaunchAgent...");
+
+    let plist_content = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.audiobookshelf.discord-rpc</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+        <string>-c</string>
+        <string>{}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/audiobookshelf-discord-rpc.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/audiobookshelf-discord-rpc.log</string>
+</dict>
+</plist>
+"#,
+        install_path.display(),
+        install_path.with_file_name("config.json").display(),
+    );
+
+    let launch_agents_dir = PathBuf::from(std::env::var("HOME")?).join("Library").join("LaunchAgents");
+    let plist_path = launch_agents_dir.join("com.audiobookshelf.discord-rpc.plist");
+    fs::create_dir_all(&launch_agents_dir)?;
+    fs::write(&plist_path, plist_content)?;
+
+    Command::new("launchctl")
+        .args(&["load", "-w", &plist_path.display().to_string()])
+        .status()?;
+
+    println!("macOS LaunchAgent created and loaded successfully.");
+    Ok(())
+}
+
+#[cfg(all(target_family = "unix", not(target_os = "macos")))]
 fn create_linux_service(install_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     println!("Creating Linux systemd service...");
 
@@ -258,7 +311,14 @@ fn stop_service() -> Result<(), Box<dyn std::error::Error>> {
             .status()?;
     }
 
-    #[cfg(target_family = "unix")]
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("launchctl")
+            .args(&["unload", &format!("{}/Library/LaunchAgents/com.audiobookshelf.discord-rpc.plist", std::env::var("HOME")?)])
+            .status()?;
+    }
+
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     {
         Command::new("systemctl")
             .args(&["--user", "stop", "audiobookshelf-discord-rpc"])
@@ -276,7 +336,14 @@ fn start_service() -> Result<(), Box<dyn std::error::Error>> {
             .status()?;
     }
 
-    #[cfg(target_family = "unix")]
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("launchctl")
+            .args(&["load", "-w", &format!("{}/Library/LaunchAgents/com.audiobookshelf.discord-rpc.plist", std::env::var("HOME")?)])
+            .status()?;
+    }
+
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     {
         Command::new("systemctl")
             .args(&["--user", "start", "audiobookshelf-discord-rpc"])
