@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Using config file: {}", config_file);
 
     let config = load_config(&config_file)?;
-    let mut discord = DiscordIpcClient::new(&config.discord_client_id)?;
+    let mut discord = DiscordIpcClient::new(&config.discord_client_id);
     discord.connect()?;
     info!("Audiobookshelf Discord RPC Connected!");
 
@@ -153,19 +153,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     error!("Error closing old Discord client (connection likely already broken): {}", close_err);
                 }
                 time::sleep(Duration::from_secs(5)).await;
-                match DiscordIpcClient::new(&config.discord_client_id) {
-                    Ok(mut new_discord) => {
-                        if let Err(connect_err) = new_discord.connect() {
-                            error!("Failed to reconnect to Discord: {}", connect_err);
-                            // Keep the old client for now, maybe add more robust handling later
-                        } else {
-                            info!("Successfully reconnected to Discord.");
-                            discord = new_discord; // Replace the old client
-                        }
-                    }
-                    Err(init_err) => {
-                        error!("Failed to create new Discord client: {}", init_err);
-                    }
+                let mut new_discord = DiscordIpcClient::new(&config.discord_client_id);
+                if let Err(connect_err) = new_discord.connect() {
+                    error!("Failed to reconnect to Discord: {}", connect_err);
+                } else {
+                    info!("Successfully reconnected to Discord.");
+                    discord = new_discord;
                 }
             } else {
                 error!("Error setting activity (not identified as pipe error): {}", e);
