@@ -271,7 +271,7 @@ async fn set_activity(
         if let Some(current_chapter) = library_item.media.chapters.iter().find(|ch| {
             current_time >= ch.start && current_time <= ch.end
         }) {
-            if current_chapter.title.to_lowercase().contains("chapter") {
+            if has_chapter_prefix(&current_chapter.title) {
                 current_chapter.title.to_string()
             } else {
                 format!("Chapter {}", current_chapter.title)
@@ -451,6 +451,37 @@ fn get_base_title(title: &str) -> &str {
         title.trim()
     }
 }
+
+fn has_chapter_prefix(title: &str) -> bool {
+    let title_lower = title.to_lowercase();
+    let chapter_words = vec![
+        "chapter", "chap", "ch",
+        "hoofdstuk", "hfdst", 
+        "kapitel", "kap",
+        "chapitre",
+        "capitulo", "capítulo", "cap",
+        "capitolo",
+        "rozdział", "rozd",
+        "глава",
+        "章", "第",
+        "luku",
+        "poglavlje",
+        "fejezet",
+        "bölüm",
+        "part", "partie", "parte", "deel", "teil"
+    ];
+    
+    for word in chapter_words {
+        if title_lower.starts_with(&format!("{} ", word)) || 
+           title_lower.starts_with(&format!("{}.", word)) ||
+           title_lower.starts_with(&format!("{}-", word)) {
+            return true;
+        }
+    }
+    false
+}
+
+
 
 #[derive(Debug, Deserialize)]
 struct CoverResponse {
