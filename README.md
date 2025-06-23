@@ -13,7 +13,7 @@ Shows Book Name, Author, Duration, Genres or Chapter, and Cover Art
 ## Run
 
 ### Windows
-* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.4.1/audiobookshelf-discord-rpc-installer.exe)
+* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.4.2/audiobookshelf-discord-rpc-installer.exe)
 * **Run the installer as admin to have the autostart service** 
 * Generate your config file
 * Create the startup task
@@ -21,7 +21,7 @@ Shows Book Name, Author, Duration, Genres or Chapter, and Cover Art
 * Files are located at %localappdata%/AudiobookshelfDiscordRPC & Service is created with Task Scheduler
 
 ### Linux
-* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.4.1/audiobookshelf-discord-rpc-installer)
+* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.4.2/audiobookshelf-discord-rpc-installer)
 ```
 ./audiobookshelf-discord-rpc-installer
 ```
@@ -31,7 +31,7 @@ Shows Book Name, Author, Duration, Genres or Chapter, and Cover Art
 * Executable and config.json are located at ~/.local/bin/ & systemd service is located at ~/.config/systemd/user/audiobookshelf-discord-rpc.service
 
 ### MacOS (Arm64 Only)
-* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.4.1/audiobookshelf-discord-rpc-installer-macos-arm64)
+* [Download the installer](https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/download/installer-v1.4.2/audiobookshelf-discord-rpc-installer-macos-arm64)
 ```
 ./audiobookshelf-discord-rpc-installer
 ```
