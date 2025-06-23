@@ -41,7 +41,7 @@ Shows Book Name, Author, Duration, Genres or Chapter, and Cover Art
 * Executable and config.json are located at ~/.local/bin/
 
 
-### Docker (Linux Only - Requires Discord Installed on system - WSL2 May Work on Windows if Discord is installed in WSL)
+### Docker (Linux Only - Requires Discord Installed on system)
 * Clone the repo
 ```
 git clone https://github.com/0xgingi/audiobookshelf-discord-rpc
