@@ -2,5 +2,9 @@
     "discord_client_id": "1283070638088650752",
     "audiobookshelf_url": "http://localhost:PORT OR https://audiobookshelf.example.com", 
     "audiobookshelf_token": "YOUR_AUDIOBOOKSHELF_API_TOKEN",
-    "show_chapters": true
+    "show_chapters": true,
+
+    //This Option will grab the covers from your ABS Server and upload them to imgur
+    "use_abs_cover": false,
+    "imgur_client_id": "GET FROM https://imgur.com/account/settings/apps"
 }

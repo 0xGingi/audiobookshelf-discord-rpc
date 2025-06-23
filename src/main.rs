@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use log::{info, error, warn};
 use env_logger;
 use std::io::ErrorKind;
+use std::collections::HashMap;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -20,6 +21,8 @@ struct Config {
     audiobookshelf_url: String,
     audiobookshelf_token: String,
     show_chapters: Option<bool>,
+    use_abs_cover: Option<bool>,
+    imgur_client_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -82,6 +85,22 @@ struct TimingInfo {
     last_position: Option<f64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CoverResponse {
+    results: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImgurResponse {
+    data: ImgurData,
+    success: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImgurData {
+    link: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -115,6 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_api_time: None,
         last_position: None,
     };
+    let mut imgur_cache: HashMap<String, String> = HashMap::new();
 
     loop {
         if let Err(e) = set_activity(
@@ -124,6 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut playback_state,
             &mut current_book,
             &mut timing_info,
+            &mut imgur_cache,
         )
         .await
         {
@@ -196,6 +217,7 @@ async fn set_activity(
     playback_state: &mut PlaybackState,
     current_book: &mut Option<Book>,
     timing_info: &mut TimingInfo,
+    imgur_cache: &mut HashMap<String, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     let sessions_url = format!(
@@ -339,7 +361,7 @@ async fn set_activity(
             .activity_type(activity::ActivityType::Listening)
     };
 
-    let cover_url = get_cover_path(client, config, book_name, author).await?;
+    let cover_url = get_cover_path(client, config, book_name, author, &session.libraryItemId, imgur_cache).await?;
 
     if let Some(ref url) = cover_url {
         activity_builder = activity_builder.assets(
@@ -376,7 +398,13 @@ async fn get_cover_path(
     config: &Config,
     title: &str,
     author: &str,
+    library_item_id: &str,
+    imgur_cache: &mut HashMap<String, String>,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if let Some(abs_cover_url) = get_cover_from_abs(client, config, library_item_id, imgur_cache).await? {
+        return Ok(Some(abs_cover_url));
+    }
+
     let search_title = if let Some(book_num) = extract_book_number(title) {
         format!("{} {}", get_base_title(title), book_num)
     } else {
@@ -481,11 +509,87 @@ fn has_chapter_prefix(title: &str) -> bool {
     false
 }
 
+async fn get_cover_from_abs(
+    client: &Client,
+    config: &Config,
+    library_item_id: &str,
+    imgur_cache: &mut HashMap<String, String>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if !config.use_abs_cover.unwrap_or(false) {
+        return Ok(None);
+    }
 
+    if let Some(cached_url) = imgur_cache.get(library_item_id) {
+        return Ok(Some(cached_url.clone()));
+    }
 
-#[derive(Debug, Deserialize)]
-struct CoverResponse {
-    results: Vec<String>,
+    let cover_url = format!(
+        "{}/api/items/{}/cover?width=400&format=jpeg",
+        config.audiobookshelf_url,
+        library_item_id
+    );
+
+    let response = client
+        .get(&cover_url)
+        .bearer_auth(&config.audiobookshelf_token)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        info!("No cover found for library item: {}", library_item_id);
+        return Ok(None);
+    }
+
+    let image_bytes = response.bytes().await?;
+    
+    if let Some(imgur_client_id) = &config.imgur_client_id {
+        match upload_to_imgur(client, imgur_client_id, &image_bytes).await {
+            Ok(imgur_url) => {
+                info!("Successfully uploaded cover to Imgur: {}", imgur_url);
+                imgur_cache.insert(library_item_id.to_string(), imgur_url.clone());
+                return Ok(Some(imgur_url));
+            }
+            Err(e) => {
+                warn!("Failed to upload to Imgur: {}", e);
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+async fn upload_to_imgur(
+    client: &Client,
+    client_id: &str,
+    image_data: &[u8],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let part = reqwest::multipart::Part::bytes(image_data.to_vec())
+        .file_name("cover.jpg")
+        .mime_str("image/jpeg")?;
+    
+    let form = reqwest::multipart::Form::new()
+        .part("image", part);
+
+    let response = client
+        .post("https://api.imgur.com/3/image")
+        .header("Authorization", format!("Client-ID {}", client_id))
+        .multipart(form)
+        .send()
+        .await?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("Imgur upload failed with status: {} - {}", status, error_text).into());
+    }
+
+    let imgur_response: ImgurResponse = response.json().await?;
+    
+    if !imgur_response.success {
+        return Err("Imgur upload was not successful".into());
+    }
+
+    Ok(imgur_response.data.link)
 }
 
 async fn check_for_update(client: &Client) -> Result<Option<String>, Box<dyn std::error::Error>> {

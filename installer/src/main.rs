@@ -145,12 +145,37 @@ fn generate_config() -> Result<serde_json::Value, io::Error> {
         .to_lowercase()
         .starts_with('y');
     
-    Ok(json!({
+    println!("\n--- Cover Art Options ---");
+    let use_abs_cover = prompt_with_default("Use cover art from your ABS server instead of external providers? (yes/no)", "no")?
+        .to_lowercase()
+        .starts_with('n');
+    
+    let imgur_client_id = if use_abs_cover {
+        println!("To use ABS covers, you need an Imgur Client ID to host the images for Discord.");
+        println!("Get one from: https://imgur.com/account/settings/apps");
+        let imgur_id = prompt_with_default("Imgur Client ID (leave empty to skip)", "")?;
+        if imgur_id.trim().is_empty() {
+            None
+        } else {
+            Some(imgur_id)
+        }
+    } else {
+        None
+    };
+    
+    let mut config = json!({
         "discord_client_id": discord_client_id,
         "audiobookshelf_url": audiobookshelf_url,
         "audiobookshelf_token": audiobookshelf_token,
         "show_chapters": show_chapters,
-    }))
+        "use_abs_cover": use_abs_cover,
+    });
+    
+    if let Some(imgur_id) = imgur_client_id {
+        config["imgur_client_id"] = json!(imgur_id);
+    }
+    
+    Ok(config)
 }
 
 fn prompt_with_default(prompt: &str, default: &str) -> Result<String, io::Error> {
