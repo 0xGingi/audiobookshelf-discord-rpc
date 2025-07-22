@@ -58,10 +58,9 @@ docker compose up -d
 ```
 
 ## Get API Key (Must Be Admin)
-![abs-api-1](https://github.com/user-attachments/assets/57a0c95d-acfc-447e-aa6a-fc8651ddca24)
-![abs-api-2](https://github.com/user-attachments/assets/b712957b-3402-469c-a85c-8f283ccc8c08)
-![abs-api-3](https://github.com/user-attachments/assets/edf71490-a695-443e-b25f-98923107f70b)
 
+<img width="1595" height="1047" alt="api1" src="https://github.com/user-attachments/assets/c1239bf0-cccf-4fe8-b94f-2f19b568a385" />
+<img width="1595" height="1047" alt="api2" src="https://github.com/user-attachments/assets/6f4c6588-db75-4108-b8e7-ebb949e37969" />
 
 
 ## Build
