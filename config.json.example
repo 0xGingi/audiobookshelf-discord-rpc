@@ -1,7 +1,8 @@
 {
     "discord_client_id": "1283070638088650752",
     "audiobookshelf_url": "http://localhost:PORT OR https://audiobookshelf.example.com", 
-    "audiobookshelf_token": "YOUR_AUDIOBOOKSHELF_API_TOKEN",
+    // Get your API Key from ABS Settings > API Keys (v2.26.0+) or use legacy token (deprecated Sept 2025)
+    "audiobookshelf_token": "YOUR_AUDIOBOOKSHELF_API_KEY",
     "show_chapters": true,
 
     //This Option will grab the covers from your ABS Server and upload them to imgur

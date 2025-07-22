@@ -121,6 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Using config file: {}", config_file);
 
     let config = load_config(&config_file)?;
+    info!("Using Audiobookshelf authentication (API Key recommended for v2.26.0+)");
     let mut discord = DiscordIpcClient::new(&config.discord_client_id);
     discord.connect()?;
     info!("Audiobookshelf Discord RPC Connected!");

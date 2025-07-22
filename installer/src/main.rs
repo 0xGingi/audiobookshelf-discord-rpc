@@ -138,7 +138,7 @@ fn generate_config() -> Result<serde_json::Value, io::Error> {
     println!("Please enter the following information:");
 
     let audiobookshelf_url = prompt("Audiobookshelf URL (Don't forget to include port if not reverse proxying)")?;
-    let audiobookshelf_token = prompt("Audiobookshelf API Key (Find this when clicking on your user in settings)")?;
+    let audiobookshelf_token = prompt("Audiobookshelf API Key (Create in ABS Settings > API Keys for v2.26.0+, or use legacy token from user settings)")?;
     let default_discord_client_id = "1283070638088650752";
     let discord_client_id = prompt_with_default("Discord Client ID", default_discord_client_id)?;
     let show_chapters = prompt_with_default("Show chapters instead of genres? (yes/no)", "no")?
