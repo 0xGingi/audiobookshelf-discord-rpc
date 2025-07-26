@@ -73,6 +73,13 @@ struct LibraryItemResponse {
     media: MediaResponse,
     #[serde(rename = "mediaType")]
     media_type: Option<String>,
+    #[serde(rename = "mediaMetadata")]
+    media_metadata: Option<LibraryItemMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LibraryItemMetadata {
+    title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,9 +343,21 @@ async fn set_activity(
     };
 
     let (book_name, author) = if is_podcast {
-        if let Some(podcast_title) = &session.mediaMetadata.podcast_title {
-            (podcast_title.clone(), session.displayTitle.clone())
+        let podcast_title = session.mediaMetadata.podcast_title.as_ref()
+            .or_else(|| {
+                library_item.media_metadata.as_ref()
+                    .and_then(|meta| meta.title.as_ref())
+            });
+        
+        info!("Podcast detected - podcast_title from session: {:?}, from library: {:?}", 
+              session.mediaMetadata.podcast_title,
+              library_item.media_metadata.as_ref().and_then(|m| m.title.as_ref()));
+        
+        if let Some(title) = podcast_title {
+            info!("Using podcast title: '{}', episode: '{}'", title, session.displayTitle);
+            (title.clone(), session.displayTitle.clone())
         } else {
+            info!("No podcast title found, using displayTitle: '{}'", session.displayTitle);
             (session.displayTitle.clone(), session.displayAuthor.clone())
         }
     } else {
