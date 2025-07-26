@@ -57,6 +57,7 @@ struct MediaMetadata {
     genres: Vec<String>,
     #[serde(rename = "podcastTitle")]
     podcast_title: Option<String>,
+    title: Option<String>,
     season: Option<String>,
     episode: Option<String>,
 }
@@ -343,15 +344,16 @@ async fn set_activity(
     };
 
     let (book_name, author) = if is_podcast {
-        let podcast_title = session.mediaMetadata.podcast_title.as_ref()
+        let podcast_title = session.mediaMetadata.title.as_ref()
+            .or_else(|| session.mediaMetadata.podcast_title.as_ref())
             .or_else(|| {
                 library_item.media_metadata.as_ref()
                     .and_then(|meta| meta.title.as_ref())
             });
         
-        info!("Podcast detected - podcast_title from session: {:?}, from library: {:?}", 
-              session.mediaMetadata.podcast_title,
-              library_item.media_metadata.as_ref().and_then(|m| m.title.as_ref()));
+        info!("Podcast detected - title from session: {:?}, podcast_title: {:?}", 
+              session.mediaMetadata.title,
+              session.mediaMetadata.podcast_title);
         
         if let Some(title) = podcast_title {
             info!("Using podcast title: '{}', episode: '{}'", title, session.displayTitle);
