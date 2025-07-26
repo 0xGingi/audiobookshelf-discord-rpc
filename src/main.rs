@@ -335,11 +335,18 @@ async fn set_activity(
         genres.to_string()
     };
 
-    let book_name = &session.displayTitle;
-    let author = &session.displayAuthor;
+    let (book_name, author) = if is_podcast {
+        if let Some(podcast_title) = &session.mediaMetadata.podcast_title {
+            (podcast_title.clone(), session.displayTitle.clone())
+        } else {
+            (session.displayTitle.clone(), session.displayAuthor.clone())
+        }
+    } else {
+        (session.displayTitle.clone(), session.displayAuthor.clone())
+    };
     let duration = session.duration;
 
-    if current_book.as_ref().map_or(true, |book| book.name != *book_name) {
+    if current_book.as_ref().map_or(true, |book| book.name != book_name) {
         *current_book = Some(Book {
             name: book_name.clone(),
         });
@@ -382,8 +389,8 @@ async fn set_activity(
         let end_time = start_time.saturating_add(total_dur);
 
         activity::Activity::new()
-            .details(book_name)
-            .state(author)
+            .details(&book_name)
+            .state(&author)
             .timestamps(
                 activity::Timestamps::new()
                     .start(start_time)
@@ -392,12 +399,12 @@ async fn set_activity(
             .activity_type(activity_type)
     } else {
         activity::Activity::new()
-            .details(book_name)
-            .state(author)
+            .details(&book_name)
+            .state(&author)
             .activity_type(activity_type)
     };
 
-    let cover_url = get_cover_path(client, config, book_name, author, &session.libraryItemId, imgur_cache, is_podcast).await?;
+    let cover_url = get_cover_path(client, config, &book_name, &author, &session.libraryItemId, imgur_cache, is_podcast).await?;
 
     if let Some(ref url) = cover_url {
         activity_builder = activity_builder.assets(
