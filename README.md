@@ -3,6 +3,8 @@ Displays what you're listening to on audiobookshelf on discord!
 
 Shows Book Name, Author, Duration, Genres or Chapter, and Cover Art
 
+* Now Supports Podcasts!
+
 * Note: This will display what you're listening to on any device but you must run this program on a computer with discord installed!
 
 * The Installer now has an update feature, just press u and let it do its thing!
