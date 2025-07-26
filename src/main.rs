@@ -53,7 +53,12 @@ struct Session {
 
 #[derive(Debug, Deserialize)]
 struct MediaMetadata {
+    #[serde(default)]
     genres: Vec<String>,
+    #[serde(rename = "podcastTitle")]
+    podcast_title: Option<String>,
+    season: Option<String>,
+    episode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,10 +71,13 @@ struct Chapter {
 #[derive(Debug, Deserialize)]
 struct LibraryItemResponse {
     media: MediaResponse,
+    #[serde(rename = "mediaType")]
+    media_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct MediaResponse {
+    #[serde(default)]
     chapters: Vec<Chapter>,
 }
 
@@ -286,11 +294,32 @@ async fn set_activity(
         .json()
         .await?;
 
+    let is_podcast = library_item.media_type.as_deref() == Some("podcast") || 
+                     session.mediaMetadata.podcast_title.is_some();
+    
     let genres = session.mediaMetadata.genres.get(0).map(|s| s.as_str()).unwrap_or("Unknown Genre");
     
     let now = SystemTime::now();
 
-    let large_text = if config.show_chapters.unwrap_or(false) {
+    let large_text = if is_podcast {
+        // For podcasts, show episode information or podcast title
+        if let Some(podcast_title) = &session.mediaMetadata.podcast_title {
+            if let (Some(season), Some(episode)) = (&session.mediaMetadata.season, &session.mediaMetadata.episode) {
+                if !season.is_empty() && !episode.is_empty() {
+                    format!("{} - S{}E{}", podcast_title, season, episode)
+                } else if !episode.is_empty() {
+                    format!("{} - Episode {}", podcast_title, episode)
+                } else {
+                    podcast_title.clone()
+                }
+            } else {
+                podcast_title.clone()
+            }
+        } else {
+            genres.to_string()
+        }
+    } else if config.show_chapters.unwrap_or(false) {
+        // Original audiobook chapter logic
         if let Some(current_chapter) = library_item.media.chapters.iter().find(|ch| {
             current_time >= ch.start && current_time <= ch.end
         }) {
@@ -338,6 +367,12 @@ async fn set_activity(
         current_time
     };
 
+    let activity_type = if is_podcast {
+        activity::ActivityType::Listening
+    } else {
+        activity::ActivityType::Listening
+    };
+
     let mut activity_builder = if playback_state.is_playing {
         let now_secs = now.duration_since(UNIX_EPOCH)?.as_secs() as i64;
         let current_pos = current_position.max(0.0) as i64;
@@ -354,15 +389,15 @@ async fn set_activity(
                     .start(start_time)
                     .end(end_time)
             )
-            .activity_type(activity::ActivityType::Listening)
+            .activity_type(activity_type)
     } else {
         activity::Activity::new()
             .details(book_name)
             .state(author)
-            .activity_type(activity::ActivityType::Listening)
+            .activity_type(activity_type)
     };
 
-    let cover_url = get_cover_path(client, config, book_name, author, &session.libraryItemId, imgur_cache).await?;
+    let cover_url = get_cover_path(client, config, book_name, author, &session.libraryItemId, imgur_cache, is_podcast).await?;
 
     if let Some(ref url) = cover_url {
         activity_builder = activity_builder.assets(
@@ -401,9 +436,14 @@ async fn get_cover_path(
     author: &str,
     library_item_id: &str,
     imgur_cache: &mut HashMap<String, String>,
+    is_podcast: bool,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     if let Some(abs_cover_url) = get_cover_from_abs(client, config, library_item_id, imgur_cache).await? {
         return Ok(Some(abs_cover_url));
+    }
+
+    if is_podcast {
+        return Ok(None);
     }
 
     let search_title = if let Some(book_num) = extract_book_number(title) {
