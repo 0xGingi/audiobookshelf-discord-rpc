@@ -670,6 +670,10 @@ async fn check_for_update(client: &Client) -> Result<Option<String>, Box<dyn std
         .await?;
 
     if !resp.status().is_success() {
+        if resp.status() == 403 {
+            warn!("GitHub API rate limit exceeded (403 Forbidden). Skipping version check.");
+            return Ok(None);
+        }
         return Err(format!("GitHub API request failed with status: {}", resp.status()).into());
     }
 

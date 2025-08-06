@@ -4,3 +4,4 @@ installer/target/
 release-windows/
 build-windows.sh
 build-docker.sh
+C*.md
