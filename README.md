@@ -9,6 +9,9 @@ Shows Book Name, Author, Duration, Genres or Chapter, and Cover Art
 
 * The Installer now has an update feature, just press u and let it do its thing!
 
+* MacOS Builds are now signed!
+
+
 ![image](https://github.com/user-attachments/assets/2354b157-3b54-4b4b-8ab3-fa7d7f64fa56)
 
 
