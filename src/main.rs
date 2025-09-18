@@ -12,6 +12,7 @@ use log::{info, error, warn};
 use env_logger;
 use std::io::ErrorKind;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -151,7 +152,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_api_time: None,
         last_position: None,
     };
-    let mut imgur_cache: HashMap<String, String> = HashMap::new();
+    let cache_file = cache_file_path(&config_file);
+    let mut imgur_cache: HashMap<String, String> = load_imgur_cache_with_fallback(&cache_file);
 
     loop {
         if let Err(e) = set_activity(
@@ -162,6 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut current_book,
             &mut timing_info,
             &mut imgur_cache,
+            &cache_file,
         )
         .await
         {
@@ -235,6 +238,7 @@ async fn set_activity(
     current_book: &mut Option<Book>,
     timing_info: &mut TimingInfo,
     imgur_cache: &mut HashMap<String, String>,
+    cache_file: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
 
     let sessions_url = format!(
@@ -310,7 +314,6 @@ async fn set_activity(
     let now = SystemTime::now();
 
     let large_text = if is_podcast {
-        // For podcasts, show episode information or podcast title
         if let Some(podcast_title) = &session.mediaMetadata.podcast_title {
             if let (Some(season), Some(episode)) = (&session.mediaMetadata.season, &session.mediaMetadata.episode) {
                 if !season.is_empty() && !episode.is_empty() {
@@ -327,7 +330,6 @@ async fn set_activity(
             genres.to_string()
         }
     } else if config.show_chapters.unwrap_or(false) {
-        // Original audiobook chapter logic
         if let Some(current_chapter) = library_item.media.chapters.iter().find(|ch| {
             current_time >= ch.start && current_time <= ch.end
         }) {
@@ -425,7 +427,17 @@ async fn set_activity(
             .activity_type(activity_type)
     };
 
-    let cover_url = get_cover_path(client, config, &book_name, &author, &session.libraryItemId, imgur_cache, is_podcast).await?;
+    let cover_url = get_cover_path(
+        client,
+        config,
+        &book_name,
+        &author,
+        &session.libraryItemId,
+        imgur_cache,
+        is_podcast,
+        cache_file,
+    )
+    .await?;
 
     if let Some(ref url) = cover_url {
         activity_builder = activity_builder.assets(
@@ -465,8 +477,21 @@ async fn get_cover_path(
     library_item_id: &str,
     imgur_cache: &mut HashMap<String, String>,
     is_podcast: bool,
+    cache_file: &Path,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    if let Some(abs_cover_url) = get_cover_from_abs(client, config, library_item_id, imgur_cache).await? {
+    if let Some(cached) = imgur_cache.get(library_item_id) {
+        info!("Using cached cover URL for {}", library_item_id);
+        return Ok(Some(cached.clone()));
+    }
+    if let Some(abs_cover_url) = get_cover_from_abs(
+        client,
+        config,
+        library_item_id,
+        imgur_cache,
+        cache_file,
+    )
+    .await?
+    {
         return Ok(Some(abs_cover_url));
     }
 
@@ -524,6 +549,10 @@ async fn get_cover_path(
     let results: Vec<Result<Option<String>, Box<dyn std::error::Error>>> = join_all(futures).await;
     for result in results {
         if let Ok(Some(url)) = result {
+            imgur_cache.insert(library_item_id.to_string(), url.clone());
+            if let Err(e) = save_imgur_cache(cache_file, imgur_cache) {
+                warn!("Failed to persist urls.json: {}", e);
+            }
             return Ok(Some(url));
         }
     }
@@ -583,10 +612,9 @@ async fn get_cover_from_abs(
     config: &Config,
     library_item_id: &str,
     imgur_cache: &mut HashMap<String, String>,
+    cache_file: &Path,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    if !config.use_abs_cover.unwrap_or(false) {
-        return Ok(None);
-    }
+    let want_imgur = !config.use_abs_cover.unwrap_or(false);
 
     if let Some(cached_url) = imgur_cache.get(library_item_id) {
         return Ok(Some(cached_url.clone()));
@@ -609,22 +637,42 @@ async fn get_cover_from_abs(
         return Ok(None);
     }
 
-    let image_bytes = response.bytes().await?;
-    
-    if let Some(imgur_client_id) = &config.imgur_client_id {
-        match upload_to_imgur(client, imgur_client_id, &image_bytes).await {
-            Ok(imgur_url) => {
-                info!("Successfully uploaded cover to Imgur: {}", imgur_url);
-                imgur_cache.insert(library_item_id.to_string(), imgur_url.clone());
-                return Ok(Some(imgur_url));
+    if want_imgur {
+        if let Some(imgur_client_id) = &config.imgur_client_id {
+            let image_bytes = response.bytes().await?;
+            match upload_to_imgur(client, imgur_client_id, &image_bytes).await {
+                Ok(imgur_url) => {
+                    info!("Successfully uploaded cover to Imgur: {}", imgur_url);
+                    imgur_cache.insert(library_item_id.to_string(), imgur_url.clone());
+                    if let Err(e) = save_imgur_cache(cache_file, imgur_cache) {
+                        warn!("Failed to persist urls.json: {}", e);
+                    }
+                    return Ok(Some(imgur_url));
+                }
+                Err(e) => {
+                    warn!("Failed to upload to Imgur: {}", e);
+                    imgur_cache.insert(library_item_id.to_string(), cover_url.clone());
+                    if let Err(e2) = save_imgur_cache(cache_file, imgur_cache) {
+                        warn!("Failed to persist urls.json: {}", e2);
+                    }
+                    return Ok(Some(cover_url));
+                }
             }
-            Err(e) => {
-                warn!("Failed to upload to Imgur: {}", e);
+        } else {
+            warn!("use_abs_cover is false but imgur_client_id is missing; using ABS URL instead.");
+            imgur_cache.insert(library_item_id.to_string(), cover_url.clone());
+            if let Err(e) = save_imgur_cache(cache_file, imgur_cache) {
+                warn!("Failed to persist urls.json: {}", e);
             }
+            return Ok(Some(cover_url));
         }
+    } else {
+        imgur_cache.insert(library_item_id.to_string(), cover_url.clone());
+        if let Err(e) = save_imgur_cache(cache_file, imgur_cache) {
+            warn!("Failed to persist urls.json: {}", e);
+        }
+        return Ok(Some(cover_url));
     }
-
-    Ok(None)
 }
 
 async fn upload_to_imgur(
@@ -685,4 +733,54 @@ async fn check_for_update(client: &Client) -> Result<Option<String>, Box<dyn std
     } else {
         Ok(None)
     }
+}
+
+fn cache_file_path(config_file: &str) -> PathBuf {
+    let path = Path::new(config_file);
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    dir.join("urls.json")
+}
+
+fn load_imgur_cache_with_fallback(primary: &Path) -> HashMap<String, String> {
+    if primary.exists() {
+        return load_imgur_cache(primary);
+    }
+    let fallback = Path::new("urls.json");
+    if fallback.exists() {
+        info!(
+            "Primary cache not found at {:?}; loading fallback from {:?}",
+            primary, fallback
+        );
+        return load_imgur_cache(fallback);
+    }
+    load_imgur_cache(primary)
+}
+
+fn load_imgur_cache(path: &Path) -> HashMap<String, String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => match serde_json::from_str::<HashMap<String, String>>(&contents) {
+            Ok(map) => {
+                info!("Loaded {} cached cover URLs from {:?}", map.len(), path);
+                map
+            }
+            Err(e) => {
+                warn!("Failed to parse {:?} (starting empty cache): {}", path, e);
+                HashMap::new()
+            }
+        },
+        Err(err) => {
+            if err.kind() != ErrorKind::NotFound {
+                warn!("Failed to read {:?} (starting empty cache): {}", path, err);
+            } else {
+                info!("No existing cache at {:?}; starting fresh", path);
+            }
+            HashMap::new()
+        }
+    }
+}
+
+fn save_imgur_cache(path: &Path, cache: &HashMap<String, String>) -> Result<(), Box<dyn std::error::Error>> {
+    let data = serde_json::to_string_pretty(cache)?;
+    fs::write(path, data)?;
+    Ok(())
 }
