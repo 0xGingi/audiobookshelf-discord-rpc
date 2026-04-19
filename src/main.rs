@@ -100,6 +100,7 @@ struct PlaybackState {
 struct TimingInfo {
     last_api_time: Option<SystemTime>,
     last_position: Option<f64>,
+    no_movement_cycles: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut timing_info = TimingInfo {
         last_api_time: None,
         last_position: None,
+        no_movement_cycles: 0,
     };
     let cache_file = cache_file_path(&config_file);
     let mut imgur_cache: HashMap<String, String> = load_imgur_cache_with_fallback(&cache_file);
@@ -275,13 +277,20 @@ async fn set_activity(
     if let (Some(last_time), Some(last_api_time)) = (timing_info.last_position, timing_info.last_api_time) {
         let elapsed = SystemTime::now().duration_since(last_api_time).unwrap_or(Duration::from_secs(0));
         if elapsed.as_secs() >= 2 && (current_time - last_time).abs() < f64::EPSILON {
-            playback_state.is_playing = false;
-            discord.clear_activity()?;
+            timing_info.no_movement_cycles = timing_info.no_movement_cycles.saturating_add(1);
+            // Only treat as paused after 2 consecutive no-movement cycles.
+            // ABS clients often sync position every ~30s, so a single 15s poll
+            // with no change doesn't mean playback has stopped.
+            if timing_info.no_movement_cycles >= 2 {
+                playback_state.is_playing = false;
+                discord.clear_activity()?;
+            }
             timing_info.last_position = Some(current_time);
             timing_info.last_api_time = Some(SystemTime::now());
             return Ok(());
         } else if (current_time - last_time).abs() > f64::EPSILON {
             playback_state.is_playing = true;
+            timing_info.no_movement_cycles = 0;
         }
     }
 
@@ -651,11 +660,10 @@ async fn get_cover_from_abs(
                 }
                 Err(e) => {
                     warn!("Failed to upload to Imgur: {}", e);
-                    imgur_cache.insert(library_item_id.to_string(), cover_url.clone());
-                    if let Err(e2) = save_imgur_cache(cache_file, imgur_cache) {
-                        warn!("Failed to persist urls.json: {}", e2);
-                    }
-                    return Ok(Some(cover_url));
+                    // Do NOT cache the ABS URL on failure — Discord cannot access
+                    // private/authenticated ABS endpoints. Leave the cache empty so
+                    // the upload is retried on the next cycle.
+                    return Ok(None);
                 }
             }
         } else {
