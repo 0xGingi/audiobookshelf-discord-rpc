@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - Cargo.toml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.release_check.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Read version from Cargo.toml
+        id: version
+        shell: bash
+        run: |
+          version="$(sed -nE 's/^version = "(.*)"/\1/p' Cargo.toml | head -n1)"
+          if [[ -z "${version}" ]]; then
+            echo "Failed to read version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=v${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check whether this push changed the package version
+        id: release_check
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should_release=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if ! git cat-file -e HEAD^ 2>/dev/null; then
+            echo "No parent commit available; skipping automatic release."
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          current_version="$(sed -nE 's/^version = "(.*)"/\1/p' Cargo.toml | head -n1)"
+          previous_version="$(git show HEAD^:Cargo.toml | sed -nE 's/^version = "(.*)"/\1/p' | head -n1)"
+
+          echo "Previous version: ${previous_version}"
+          echo "Current version: ${current_version}"
+
+          if [[ -n "${previous_version}" && "${current_version}" != "${previous_version}" ]]; then
+            echo "should_release=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            runner: ubuntu-latest
+            binary_name: audiobookshelf-discord-rpc
+            asset_name: audiobookshelf-discord-rpc-linux-x64
+          - label: macos-arm64
+            runner: macos-latest
+            binary_name: audiobookshelf-discord-rpc
+            asset_name: audiobookshelf-discord-rpc-macos-arm64
+          - label: windows-x64
+            runner: windows-latest
+            binary_name: audiobookshelf-discord-rpc.exe
+            asset_name: audiobookshelf-discord-rpc.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked
+
+      - name: Stage release artifact
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp "target/release/${{ matrix.binary_name }}" "release-assets/${{ matrix.asset_name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: release-assets/${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs:
+      - prepare
+      - build
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Show staged files
+        shell: bash
+        run: find dist -type f -maxdepth 2 | sort
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/linux-x64/audiobookshelf-discord-rpc-linux-x64
+            dist/macos-arm64/audiobookshelf-discord-rpc-macos-arm64
+            dist/windows-x64/audiobookshelf-discord-rpc.exe
