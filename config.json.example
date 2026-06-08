@@ -5,7 +5,7 @@
     "audiobookshelf_token": "YOUR_AUDIOBOOKSHELF_API_KEY",
     "show_chapters": true,
 
-    //This Option will grab the covers from your ABS Server and upload them to imgur
+    // This option will grab covers from your ABS server and upload them to ImgBB.
     "use_abs_cover": false,
-    "imgur_client_id": "GET FROM https://imgur.com/account/settings/apps"
+    "imgbb_api_key": "GET FROM https://api.imgbb.com/"
 }

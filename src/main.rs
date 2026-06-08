@@ -1,18 +1,18 @@
-use discord_rich_presence::{activity, DiscordIpcClient, DiscordIpc};
-use futures::future::join_all;
-use serde::Deserialize;
-use std::fs;
-use std::time::Duration;
-use tokio::time;
-use reqwest::Client;
-use url::Url;
-use std::env;
-use std::time::{SystemTime, UNIX_EPOCH};
-use log::{info, error, warn};
+use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 use env_logger;
-use std::io::ErrorKind;
+use futures::future::join_all;
+use log::{error, info, warn};
+use reqwest::Client;
+use serde::Deserialize;
 use std::collections::HashMap;
+use std::env;
+use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::time;
+use url::Url;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -23,7 +23,7 @@ struct Config {
     audiobookshelf_token: String,
     show_chapters: Option<bool>,
     use_abs_cover: Option<bool>,
-    imgur_client_id: Option<String>,
+    imgbb_api_key: Option<String>,
 }
 
 #[derive(Debug)]
@@ -49,7 +49,7 @@ struct Session {
     currentTime: f64,
     duration: f64,
     mediaMetadata: MediaMetadata,
-    libraryItemId: String
+    libraryItemId: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,14 +109,15 @@ struct CoverResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct ImgurResponse {
-    data: ImgurData,
+struct ImgbbResponse {
+    data: ImgbbData,
     success: bool,
 }
 
 #[derive(Debug, Deserialize)]
-struct ImgurData {
-    link: String,
+struct ImgbbData {
+    url: String,
+    display_url: Option<String>,
 }
 
 #[tokio::main]
@@ -155,7 +156,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         no_movement_cycles: 0,
     };
     let cache_file = cache_file_path(&config_file);
-    let mut imgur_cache: HashMap<String, String> = load_imgur_cache_with_fallback(&cache_file);
+    let mut cover_url_cache: HashMap<String, String> =
+        load_cover_url_cache_with_fallback(&cache_file);
 
     loop {
         if let Err(e) = set_activity(
@@ -165,14 +167,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut playback_state,
             &mut current_book,
             &mut timing_info,
-            &mut imgur_cache,
+            &mut cover_url_cache,
             &cache_file,
         )
         .await
         {
             let mut is_pipe_error = false;
             if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-                if io_err.kind() == ErrorKind::BrokenPipe || io_err.raw_os_error() == Some(232) || io_err.raw_os_error() == Some(32) {
+                if io_err.kind() == ErrorKind::BrokenPipe
+                    || io_err.raw_os_error() == Some(232)
+                    || io_err.raw_os_error() == Some(32)
+                {
                     is_pipe_error = true;
                 }
             }
@@ -181,7 +186,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut source = e.source();
                 while let Some(err) = source {
                     if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
-                        if io_err.kind() == ErrorKind::BrokenPipe || io_err.raw_os_error() == Some(232) || io_err.raw_os_error() == Some(32) {
+                        if io_err.kind() == ErrorKind::BrokenPipe
+                            || io_err.raw_os_error() == Some(232)
+                            || io_err.raw_os_error() == Some(32)
+                        {
                             is_pipe_error = true;
                             break;
                         }
@@ -193,7 +201,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if is_pipe_error {
                 warn!("Connection to Discord lost (pipe closed). Attempting to reconnect...");
                 if let Err(close_err) = discord.close() {
-                    error!("Error closing old Discord client (connection likely already broken): {}", close_err);
+                    error!(
+                        "Error closing old Discord client (connection likely already broken): {}",
+                        close_err
+                    );
                 }
                 time::sleep(Duration::from_secs(5)).await;
                 let mut new_discord = DiscordIpcClient::new(&config.discord_client_id);
@@ -204,7 +215,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     discord = new_discord;
                 }
             } else {
-                error!("Error setting activity (not identified as pipe error): {}", e);
+                error!(
+                    "Error setting activity (not identified as pipe error): {}",
+                    e
+                );
                 error!("Full error details: {:?}", e);
             }
         }
@@ -239,15 +253,14 @@ async fn set_activity(
     playback_state: &mut PlaybackState,
     current_book: &mut Option<Book>,
     timing_info: &mut TimingInfo,
-    imgur_cache: &mut HashMap<String, String>,
+    cover_url_cache: &mut HashMap<String, String>,
     cache_file: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-
     let sessions_url = format!(
-        "{}/api/me/listening-sessions?itemsPerPage=1", 
+        "{}/api/me/listening-sessions?itemsPerPage=1",
         config.audiobookshelf_url
     );
-    
+
     let resp = client
         .get(&sessions_url)
         .bearer_auth(&config.audiobookshelf_token)
@@ -263,7 +276,7 @@ async fn set_activity(
     }
 
     let session = &resp.sessions[0];
-    
+
     if timing_info.last_position.is_none() {
         playback_state.is_playing = false;
         discord.clear_activity()?;
@@ -273,9 +286,13 @@ async fn set_activity(
     }
 
     let current_time = session.currentTime;
-    
-    if let (Some(last_time), Some(last_api_time)) = (timing_info.last_position, timing_info.last_api_time) {
-        let elapsed = SystemTime::now().duration_since(last_api_time).unwrap_or(Duration::from_secs(0));
+
+    if let (Some(last_time), Some(last_api_time)) =
+        (timing_info.last_position, timing_info.last_api_time)
+    {
+        let elapsed = SystemTime::now()
+            .duration_since(last_api_time)
+            .unwrap_or(Duration::from_secs(0));
         if elapsed.as_secs() >= 2 && (current_time - last_time).abs() < f64::EPSILON {
             timing_info.no_movement_cycles = timing_info.no_movement_cycles.saturating_add(1);
             // Only treat as paused after 2 consecutive no-movement cycles.
@@ -302,11 +319,10 @@ async fn set_activity(
     }
 
     let library_item_url = format!(
-        "{}/api/items/{}?include=chapters", 
-        config.audiobookshelf_url,
-        session.libraryItemId
+        "{}/api/items/{}?include=chapters",
+        config.audiobookshelf_url, session.libraryItemId
     );
-    
+
     let library_item: LibraryItemResponse = client
         .get(&library_item_url)
         .bearer_auth(&config.audiobookshelf_token)
@@ -315,16 +331,24 @@ async fn set_activity(
         .json()
         .await?;
 
-    let is_podcast = library_item.media_type.as_deref() == Some("podcast") || 
-                     session.mediaMetadata.podcast_title.is_some();
-    
-    let genres = session.mediaMetadata.genres.get(0).map(|s| s.as_str()).unwrap_or("Unknown Genre");
-    
+    let is_podcast = library_item.media_type.as_deref() == Some("podcast")
+        || session.mediaMetadata.podcast_title.is_some();
+
+    let genres = session
+        .mediaMetadata
+        .genres
+        .get(0)
+        .map(|s| s.as_str())
+        .unwrap_or("Unknown Genre");
+
     let now = SystemTime::now();
 
     let large_text = if is_podcast {
         if let Some(podcast_title) = &session.mediaMetadata.podcast_title {
-            if let (Some(season), Some(episode)) = (&session.mediaMetadata.season, &session.mediaMetadata.episode) {
+            if let (Some(season), Some(episode)) = (
+                &session.mediaMetadata.season,
+                &session.mediaMetadata.episode,
+            ) {
                 if !season.is_empty() && !episode.is_empty() {
                     format!("{} - S{}E{}", podcast_title, season, episode)
                 } else if !episode.is_empty() {
@@ -339,9 +363,12 @@ async fn set_activity(
             genres.to_string()
         }
     } else if config.show_chapters.unwrap_or(false) {
-        if let Some(current_chapter) = library_item.media.chapters.iter().find(|ch| {
-            current_time >= ch.start && current_time <= ch.end
-        }) {
+        if let Some(current_chapter) = library_item
+            .media
+            .chapters
+            .iter()
+            .find(|ch| current_time >= ch.start && current_time <= ch.end)
+        {
             if has_chapter_prefix(&current_chapter.title) {
                 current_chapter.title.to_string()
             } else {
@@ -355,22 +382,34 @@ async fn set_activity(
     };
 
     let (book_name, author) = if is_podcast {
-        let podcast_title = session.mediaMetadata.title.as_ref()
+        let podcast_title = session
+            .mediaMetadata
+            .title
+            .as_ref()
             .or_else(|| session.mediaMetadata.podcast_title.as_ref())
             .or_else(|| {
-                library_item.media_metadata.as_ref()
+                library_item
+                    .media_metadata
+                    .as_ref()
                     .and_then(|meta| meta.title.as_ref())
             });
-        
-        info!("Podcast detected - title from session: {:?}, podcast_title: {:?}", 
-              session.mediaMetadata.title,
-              session.mediaMetadata.podcast_title);
-        
+
+        info!(
+            "Podcast detected - title from session: {:?}, podcast_title: {:?}",
+            session.mediaMetadata.title, session.mediaMetadata.podcast_title
+        );
+
         if let Some(title) = podcast_title {
-            info!("Using podcast title: '{}', episode: '{}'", title, session.displayTitle);
+            info!(
+                "Using podcast title: '{}', episode: '{}'",
+                title, session.displayTitle
+            );
             (title.clone(), session.displayTitle.clone())
         } else {
-            info!("No podcast title found, using displayTitle: '{}'", session.displayTitle);
+            info!(
+                "No podcast title found, using displayTitle: '{}'",
+                session.displayTitle
+            );
             (session.displayTitle.clone(), session.displayAuthor.clone())
         }
     } else {
@@ -378,7 +417,10 @@ async fn set_activity(
     };
     let duration = session.duration;
 
-    if current_book.as_ref().map_or(true, |book| book.name != book_name) {
+    if current_book
+        .as_ref()
+        .map_or(true, |book| book.name != book_name)
+    {
         *current_book = Some(Book {
             name: book_name.clone(),
         });
@@ -393,9 +435,9 @@ async fn set_activity(
             .duration_since(playback_state.last_api_time)
             .unwrap_or(Duration::from_secs(0))
             .as_secs_f64();
-        
+
         let adjusted_elapsed = elapsed * 0.8;
-        
+
         if (current_time - timing_info.last_position.unwrap_or(0.0)).abs() > f64::EPSILON {
             playback_state.last_api_time = now;
             current_time
@@ -423,11 +465,7 @@ async fn set_activity(
         activity::Activity::new()
             .details(&book_name)
             .state(&author)
-            .timestamps(
-                activity::Timestamps::new()
-                    .start(start_time)
-                    .end(end_time)
-            )
+            .timestamps(activity::Timestamps::new().start(start_time).end(end_time))
             .activity_type(activity_type)
     } else {
         activity::Activity::new()
@@ -442,7 +480,7 @@ async fn set_activity(
         &book_name,
         &author,
         &session.libraryItemId,
-        imgur_cache,
+        cover_url_cache,
         is_podcast,
         cache_file,
     )
@@ -452,13 +490,15 @@ async fn set_activity(
         activity_builder = activity_builder.assets(
             activity::Assets::new()
                 .large_image(url)
-                .large_text(&large_text)
+                .large_text(&large_text),
         );
     }
 
     discord.set_activity(activity_builder)?;
 
-    if let (Some(last_time), Some(last_api_time)) = (timing_info.last_position, timing_info.last_api_time) {
+    if let (Some(last_time), Some(last_api_time)) =
+        (timing_info.last_position, timing_info.last_api_time)
+    {
         if (current_time - last_time).abs() > f64::EPSILON {
             let elapsed = SystemTime::now()
                 .duration_since(last_api_time)
@@ -471,7 +511,7 @@ async fn set_activity(
             );
         }
     }
-    
+
     timing_info.last_position = Some(current_time);
     timing_info.last_api_time = Some(SystemTime::now());
 
@@ -484,22 +524,16 @@ async fn get_cover_path(
     title: &str,
     author: &str,
     library_item_id: &str,
-    imgur_cache: &mut HashMap<String, String>,
+    cover_url_cache: &mut HashMap<String, String>,
     is_podcast: bool,
     cache_file: &Path,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    if let Some(cached) = imgur_cache.get(library_item_id) {
+    if let Some(cached) = cover_url_cache.get(library_item_id) {
         info!("Using cached cover URL for {}", library_item_id);
         return Ok(Some(cached.clone()));
     }
-    if let Some(abs_cover_url) = get_cover_from_abs(
-        client,
-        config,
-        library_item_id,
-        imgur_cache,
-        cache_file,
-    )
-    .await?
+    if let Some(abs_cover_url) =
+        get_cover_from_abs(client, config, library_item_id, cover_url_cache, cache_file).await?
     {
         return Ok(Some(abs_cover_url));
     }
@@ -539,7 +573,11 @@ async fn get_cover_path(
         async move {
             let url = Url::parse_with_params(
                 &format!("{}/api/search/covers", config.audiobookshelf_url),
-                &[("title", title.as_str()), ("author", author.as_str()), ("provider", *provider)],
+                &[
+                    ("title", title.as_str()),
+                    ("author", author.as_str()),
+                    ("provider", *provider),
+                ],
             )?;
             let resp: CoverResponse = client
                 .get(url)
@@ -558,8 +596,8 @@ async fn get_cover_path(
     let results: Vec<Result<Option<String>, Box<dyn std::error::Error>>> = join_all(futures).await;
     for result in results {
         if let Ok(Some(url)) = result {
-            imgur_cache.insert(library_item_id.to_string(), url.clone());
-            if let Err(e) = save_imgur_cache(cache_file, imgur_cache) {
+            cover_url_cache.insert(library_item_id.to_string(), url.clone());
+            if let Err(e) = save_cover_url_cache(cache_file, cover_url_cache) {
                 warn!("Failed to persist urls.json: {}", e);
             }
             return Ok(Some(url));
@@ -590,26 +628,39 @@ fn get_base_title(title: &str) -> &str {
 fn has_chapter_prefix(title: &str) -> bool {
     let title_lower = title.to_lowercase();
     let chapter_words = vec![
-        "chapter", "chap", "ch",
-        "hoofdstuk", "hfdst", 
-        "kapitel", "kap",
+        "chapter",
+        "chap",
+        "ch",
+        "hoofdstuk",
+        "hfdst",
+        "kapitel",
+        "kap",
         "chapitre",
-        "capitulo", "capítulo", "cap",
+        "capitulo",
+        "capítulo",
+        "cap",
         "capitolo",
-        "rozdział", "rozd",
+        "rozdział",
+        "rozd",
         "глава",
-        "章", "第",
+        "章",
+        "第",
         "luku",
         "poglavlje",
         "fejezet",
         "bölüm",
-        "part", "partie", "parte", "deel", "teil"
+        "part",
+        "partie",
+        "parte",
+        "deel",
+        "teil",
     ];
-    
+
     for word in chapter_words {
-        if title_lower.starts_with(&format!("{} ", word)) || 
-           title_lower.starts_with(&format!("{}.", word)) ||
-           title_lower.starts_with(&format!("{}-", word)) {
+        if title_lower.starts_with(&format!("{} ", word))
+            || title_lower.starts_with(&format!("{}.", word))
+            || title_lower.starts_with(&format!("{}-", word))
+        {
             return true;
         }
     }
@@ -620,19 +671,18 @@ async fn get_cover_from_abs(
     client: &Client,
     config: &Config,
     library_item_id: &str,
-    imgur_cache: &mut HashMap<String, String>,
+    cover_url_cache: &mut HashMap<String, String>,
     cache_file: &Path,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let want_imgur = !config.use_abs_cover.unwrap_or(false);
+    let want_image_host_upload = !config.use_abs_cover.unwrap_or(false);
 
-    if let Some(cached_url) = imgur_cache.get(library_item_id) {
+    if let Some(cached_url) = cover_url_cache.get(library_item_id) {
         return Ok(Some(cached_url.clone()));
     }
 
     let cover_url = format!(
         "{}/api/items/{}/cover?width=400&format=jpeg",
-        config.audiobookshelf_url,
-        library_item_id
+        config.audiobookshelf_url, library_item_id
     );
 
     let response = client
@@ -646,20 +696,20 @@ async fn get_cover_from_abs(
         return Ok(None);
     }
 
-    if want_imgur {
-        if let Some(imgur_client_id) = &config.imgur_client_id {
+    if want_image_host_upload {
+        if let Some(imgbb_api_key) = &config.imgbb_api_key {
             let image_bytes = response.bytes().await?;
-            match upload_to_imgur(client, imgur_client_id, &image_bytes).await {
-                Ok(imgur_url) => {
-                    info!("Successfully uploaded cover to Imgur: {}", imgur_url);
-                    imgur_cache.insert(library_item_id.to_string(), imgur_url.clone());
-                    if let Err(e) = save_imgur_cache(cache_file, imgur_cache) {
+            match upload_to_imgbb(client, imgbb_api_key, &image_bytes).await {
+                Ok(imgbb_url) => {
+                    info!("Successfully uploaded cover to ImgBB: {}", imgbb_url);
+                    cover_url_cache.insert(library_item_id.to_string(), imgbb_url.clone());
+                    if let Err(e) = save_cover_url_cache(cache_file, cover_url_cache) {
                         warn!("Failed to persist urls.json: {}", e);
                     }
-                    return Ok(Some(imgur_url));
+                    return Ok(Some(imgbb_url));
                 }
                 Err(e) => {
-                    warn!("Failed to upload to Imgur: {}", e);
+                    warn!("Failed to upload to ImgBB: {}", e);
                     // Do NOT cache the ABS URL on failure — Discord cannot access
                     // private/authenticated ABS endpoints. Leave the cache empty so
                     // the upload is retried on the next cycle.
@@ -667,54 +717,60 @@ async fn get_cover_from_abs(
                 }
             }
         } else {
-            warn!("use_abs_cover is false but imgur_client_id is missing; using ABS URL instead.");
-            imgur_cache.insert(library_item_id.to_string(), cover_url.clone());
-            if let Err(e) = save_imgur_cache(cache_file, imgur_cache) {
+            warn!("use_abs_cover is false but imgbb_api_key is missing; using ABS URL instead.");
+            cover_url_cache.insert(library_item_id.to_string(), cover_url.clone());
+            if let Err(e) = save_cover_url_cache(cache_file, cover_url_cache) {
                 warn!("Failed to persist urls.json: {}", e);
             }
             return Ok(Some(cover_url));
         }
     } else {
-        imgur_cache.insert(library_item_id.to_string(), cover_url.clone());
-        if let Err(e) = save_imgur_cache(cache_file, imgur_cache) {
+        cover_url_cache.insert(library_item_id.to_string(), cover_url.clone());
+        if let Err(e) = save_cover_url_cache(cache_file, cover_url_cache) {
             warn!("Failed to persist urls.json: {}", e);
         }
         return Ok(Some(cover_url));
     }
 }
 
-async fn upload_to_imgur(
+async fn upload_to_imgbb(
     client: &Client,
-    client_id: &str,
+    api_key: &str,
     image_data: &[u8],
 ) -> Result<String, Box<dyn std::error::Error>> {
     let part = reqwest::multipart::Part::bytes(image_data.to_vec())
         .file_name("cover.jpg")
         .mime_str("image/jpeg")?;
-    
-    let form = reqwest::multipart::Form::new()
-        .part("image", part);
 
-    let response = client
-        .post("https://api.imgur.com/3/image")
-        .header("Authorization", format!("Client-ID {}", client_id))
-        .multipart(form)
-        .send()
-        .await?;
+    let form = reqwest::multipart::Form::new().part("image", part);
+
+    let upload_url = Url::parse_with_params("https://api.imgbb.com/1/upload", &[("key", api_key)])?;
+
+    let response = client.post(upload_url).multipart(form).send().await?;
 
     let status = response.status();
     if !status.is_success() {
-        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(format!("Imgur upload failed with status: {} - {}", status, error_text).into());
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!(
+            "ImgBB upload failed with status: {} - {}",
+            status, error_text
+        )
+        .into());
     }
 
-    let imgur_response: ImgurResponse = response.json().await?;
-    
-    if !imgur_response.success {
-        return Err("Imgur upload was not successful".into());
+    let imgbb_response: ImgbbResponse = response.json().await?;
+
+    if !imgbb_response.success {
+        return Err("ImgBB upload was not successful".into());
     }
 
-    Ok(imgur_response.data.link)
+    Ok(imgbb_response
+        .data
+        .display_url
+        .unwrap_or(imgbb_response.data.url))
 }
 
 async fn check_for_update(client: &Client) -> Result<Option<String>, Box<dyn std::error::Error>> {
@@ -749,9 +805,9 @@ fn cache_file_path(config_file: &str) -> PathBuf {
     dir.join("urls.json")
 }
 
-fn load_imgur_cache_with_fallback(primary: &Path) -> HashMap<String, String> {
+fn load_cover_url_cache_with_fallback(primary: &Path) -> HashMap<String, String> {
     if primary.exists() {
-        return load_imgur_cache(primary);
+        return load_cover_url_cache(primary);
     }
     let fallback = Path::new("urls.json");
     if fallback.exists() {
@@ -759,12 +815,12 @@ fn load_imgur_cache_with_fallback(primary: &Path) -> HashMap<String, String> {
             "Primary cache not found at {:?}; loading fallback from {:?}",
             primary, fallback
         );
-        return load_imgur_cache(fallback);
+        return load_cover_url_cache(fallback);
     }
-    load_imgur_cache(primary)
+    load_cover_url_cache(primary)
 }
 
-fn load_imgur_cache(path: &Path) -> HashMap<String, String> {
+fn load_cover_url_cache(path: &Path) -> HashMap<String, String> {
     match fs::read_to_string(path) {
         Ok(contents) => match serde_json::from_str::<HashMap<String, String>>(&contents) {
             Ok(map) => {
@@ -787,7 +843,10 @@ fn load_imgur_cache(path: &Path) -> HashMap<String, String> {
     }
 }
 
-fn save_imgur_cache(path: &Path, cache: &HashMap<String, String>) -> Result<(), Box<dyn std::error::Error>> {
+fn save_cover_url_cache(
+    path: &Path,
+    cache: &HashMap<String, String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let data = serde_json::to_string_pretty(cache)?;
     fs::write(path, data)?;
     Ok(())

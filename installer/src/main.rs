@@ -1,10 +1,10 @@
+use reqwest::Client;
+use serde_json::json;
+use serde_json::Value;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use reqwest::Client;
-use serde_json::json;
 use std::process::Command;
-use serde_json::Value;
 
 const CURRENT_INSTALLER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -17,12 +17,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let latest_installer_version = get_latest_installer_version(&client).await?;
 
     if latest_installer_version != current_installer_version {
-        println!("A new version of the installer is available: {}", latest_installer_version);
+        println!(
+            "A new version of the installer is available: {}",
+            latest_installer_version
+        );
         println!("Please download the latest version from https://github.com/0xGingi/audiobookshelf-discord-rpc/releases/tag/{}", latest_installer_version);
     }
 
-    let action = prompt_with_default("Do you want to (i)nstall or (u)pdate?", "install")?
-        .to_lowercase();
+    let action =
+        prompt_with_default("Do you want to (i)nstall or (u)pdate?", "install")?.to_lowercase();
 
     let client = Client::new();
     let latest_version = get_latest_version(&client).await?;
@@ -75,13 +78,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Binary installed to: {}", install_path.display());
 
-        let should_generate_config = prompt_with_default("Do you want to generate a config.json file?", "yes")?
-            .to_lowercase();
-        
+        let should_generate_config =
+            prompt_with_default("Do you want to generate a config.json file?", "yes")?
+                .to_lowercase();
+
         if should_generate_config.starts_with('y') {
             println!("Generating config.json...");
             let config = generate_config()?;
-        
+
             let config_path = install_path.with_file_name("config.json");
             fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
             println!("Config file created at: {}", config_path.display());
@@ -90,23 +94,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Note: You'll need to create a config.json file manually before running the service.");
         }
 
-        let should_install_service = prompt_with_default("Do you want to install an autostart service?", "yes")?
-            .to_lowercase();
-        
+        let should_install_service =
+            prompt_with_default("Do you want to install an autostart service?", "yes")?
+                .to_lowercase();
+
         if should_install_service.starts_with('y') {
             #[cfg(target_os = "windows")]
             create_windows_service(&install_path)?;
-        
+
             #[cfg(target_os = "macos")]
             create_macos_service(&install_path)?;
-        
+
             #[cfg(all(target_family = "unix", not(target_os = "macos")))]
             create_linux_service(&install_path)?;
         } else {
             println!("Skipping service installation.");
             println!("Note: You'll need to start the service manually or create a service");
         }
-        
+
         println!("Installation complete!");
     }
 
@@ -117,7 +122,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn get_latest_version(client: &Client) -> Result<String, Box<dyn std::error::Error>> {
     let url = "https://api.github.com/repos/0xGingi/audiobookshelf-discord-rpc/releases/latest";
-    let resp = client.get(url)
+    let resp = client
+        .get(url)
         .header("User-Agent", "Audiobookshelf-Discord-RPC-Installer")
         .send()
         .await?;
@@ -137,32 +143,36 @@ async fn get_latest_version(client: &Client) -> Result<String, Box<dyn std::erro
 fn generate_config() -> Result<serde_json::Value, io::Error> {
     println!("Please enter the following information:");
 
-    let audiobookshelf_url = prompt("Audiobookshelf URL (Don't forget to include port if not reverse proxying)")?;
+    let audiobookshelf_url =
+        prompt("Audiobookshelf URL (Don't forget to include port if not reverse proxying)")?;
     let audiobookshelf_token = prompt("Audiobookshelf API Key (Create in ABS Settings > API Keys for v2.26.0+, or use legacy token from user settings)")?;
     let default_discord_client_id = "1283070638088650752";
     let discord_client_id = prompt_with_default("Discord Client ID", default_discord_client_id)?;
     let show_chapters = prompt_with_default("Show chapters instead of genres? (yes/no)", "no")?
         .to_lowercase()
         .starts_with('y');
-    
+
     println!("\n--- Cover Art Options ---");
-    let use_abs_cover = prompt_with_default("Use cover art from your ABS server instead of external providers? (yes/no)", "no")?
-        .to_lowercase()
-        .starts_with('n');
-    
-    let imgur_client_id = if use_abs_cover {
-        println!("To use ABS covers, you need an Imgur Client ID to host the images for Discord.");
-        println!("Get one from: https://imgur.com/account/settings/apps");
-        let imgur_id = prompt_with_default("Imgur Client ID (leave empty to skip)", "")?;
-        if imgur_id.trim().is_empty() {
+    let use_abs_cover = prompt_with_default(
+        "Use cover art from your ABS server instead of external providers? (yes/no)",
+        "no",
+    )?
+    .to_lowercase()
+    .starts_with('n');
+
+    let imgbb_api_key = if use_abs_cover {
+        println!("To use ABS covers, you need an ImgBB API key to host the images for Discord.");
+        println!("Get one from: https://api.imgbb.com/");
+        let api_key = prompt_with_default("ImgBB API key (leave empty to skip)", "")?;
+        if api_key.trim().is_empty() {
             None
         } else {
-            Some(imgur_id)
+            Some(api_key)
         }
     } else {
         None
     };
-    
+
     let mut config = json!({
         "discord_client_id": discord_client_id,
         "audiobookshelf_url": audiobookshelf_url,
@@ -170,11 +180,11 @@ fn generate_config() -> Result<serde_json::Value, io::Error> {
         "show_chapters": show_chapters,
         "use_abs_cover": use_abs_cover,
     });
-    
-    if let Some(imgur_id) = imgur_client_id {
-        config["imgur_client_id"] = json!(imgur_id);
+
+    if let Some(api_key) = imgbb_api_key {
+        config["imgbb_api_key"] = json!(api_key);
     }
-    
+
     Ok(config)
 }
 
@@ -205,10 +215,10 @@ fn create_windows_service(install_path: &PathBuf) -> Result<(), Box<dyn std::err
 
     let task_name = "AudiobookshelfDiscordRPC";
     let task_program = install_path.display().to_string();
-    
+
     let config_path_buf = install_path.with_file_name("config.json");
     let config_path_display = config_path_buf.display();
-    
+
     let task_arguments = format!("-c \"{}\"", config_path_display);
 
     let powershell_command = format!(
@@ -231,7 +241,10 @@ fn create_windows_service(install_path: &PathBuf) -> Result<(), Box<dyn std::err
         println!("Windows Task Scheduler task created and started successfully.");
     } else {
         println!("Failed to create or start Windows Task Scheduler task.");
-        println!("PowerShell error: {}", String::from_utf8_lossy(&output.stderr));
+        println!(
+            "PowerShell error: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     Ok(())
@@ -269,7 +282,9 @@ fn create_macos_service(install_path: &PathBuf) -> Result<(), Box<dyn std::error
         install_path.with_file_name("config.json").display(),
     );
 
-    let launch_agents_dir = PathBuf::from(std::env::var("HOME")?).join("Library").join("LaunchAgents");
+    let launch_agents_dir = PathBuf::from(std::env::var("HOME")?)
+        .join("Library")
+        .join("LaunchAgents");
     let plist_path = launch_agents_dir.join("com.audiobookshelf.discord-rpc.plist");
     fs::create_dir_all(&launch_agents_dir)?;
     fs::write(&plist_path, plist_content)?;
@@ -306,7 +321,10 @@ WantedBy=default.target
         install_path.with_file_name("config.json").display(),
     );
 
-    let config_dir = PathBuf::from(std::env::var("HOME")?).join(".config").join("systemd").join("user");
+    let config_dir = PathBuf::from(std::env::var("HOME")?)
+        .join(".config")
+        .join("systemd")
+        .join("user");
     let service_path = config_dir.join("audiobookshelf-discord-rpc.service");
     fs::create_dir_all(&config_dir)?;
     fs::write(&service_path, service_content)?;
@@ -339,7 +357,13 @@ fn stop_service() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]
     {
         Command::new("launchctl")
-            .args(&["unload", &format!("{}/Library/LaunchAgents/com.audiobookshelf.discord-rpc.plist", std::env::var("HOME")?)])
+            .args(&[
+                "unload",
+                &format!(
+                    "{}/Library/LaunchAgents/com.audiobookshelf.discord-rpc.plist",
+                    std::env::var("HOME")?
+                ),
+            ])
             .status()?;
     }
 
@@ -364,7 +388,14 @@ fn start_service() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]
     {
         Command::new("launchctl")
-            .args(&["load", "-w", &format!("{}/Library/LaunchAgents/com.audiobookshelf.discord-rpc.plist", std::env::var("HOME")?)])
+            .args(&[
+                "load",
+                "-w",
+                &format!(
+                    "{}/Library/LaunchAgents/com.audiobookshelf.discord-rpc.plist",
+                    std::env::var("HOME")?
+                ),
+            ])
             .status()?;
     }
 
@@ -378,7 +409,11 @@ fn start_service() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn update_binary(client: &Client, download_url: &str, install_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+async fn update_binary(
+    client: &Client,
+    download_url: &str,
+    install_path: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
     let content = download_file(client, download_url).await?;
     fs::write(install_path, content)?;
 
@@ -402,9 +437,12 @@ async fn download_file(client: &Client, url: &str) -> Result<Vec<u8>, Box<dyn st
     Ok(bytes.to_vec())
 }
 
-async fn get_latest_installer_version(client: &Client) -> Result<String, Box<dyn std::error::Error>> {
+async fn get_latest_installer_version(
+    client: &Client,
+) -> Result<String, Box<dyn std::error::Error>> {
     let url = "https://api.github.com/repos/0xGingi/audiobookshelf-discord-rpc/releases";
-    let resp = client.get(url)
+    let resp = client
+        .get(url)
         .header("User-Agent", "Audiobookshelf-Discord-RPC-Installer")
         .send()
         .await?;
@@ -414,7 +452,8 @@ async fn get_latest_installer_version(client: &Client) -> Result<String, Box<dyn
     }
 
     let releases: Vec<Value> = resp.json().await?;
-    let latest_installer_release = releases.iter()
+    let latest_installer_release = releases
+        .iter()
         .filter_map(|release| release.get("tag_name").and_then(Value::as_str))
         .filter(|tag| tag.starts_with("installer-v"))
         .max()

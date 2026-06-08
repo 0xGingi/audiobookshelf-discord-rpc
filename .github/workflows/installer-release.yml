@@ -1,0 +1,162 @@
+name: Installer Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - installer-v*
+    paths:
+      - installer/Cargo.toml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare Installer Release
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.release_check.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Read version from installer/Cargo.toml
+        id: version
+        shell: bash
+        run: |
+          version="$(sed -nE 's/^version = "(.*)"/\1/p' installer/Cargo.toml | head -n1)"
+          if [[ -z "${version}" ]]; then
+            echo "Failed to read version from installer/Cargo.toml" >&2
+            exit 1
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=installer-v${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check whether this push changed the installer package version
+        id: release_check
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should_release=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            expected_tag="installer-v${{ steps.version.outputs.version }}"
+            if [[ "${{ github.ref_name }}" != "${expected_tag}" ]]; then
+              echo "Tag ${{ github.ref_name }} does not match installer/Cargo.toml version ${expected_tag}" >&2
+              exit 1
+            fi
+            echo "should_release=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if ! git cat-file -e HEAD^ 2>/dev/null; then
+            echo "No parent commit available; skipping automatic installer release."
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          current_version="$(sed -nE 's/^version = "(.*)"/\1/p' installer/Cargo.toml | head -n1)"
+          previous_version="$(git show HEAD^:installer/Cargo.toml | sed -nE 's/^version = "(.*)"/\1/p' | head -n1)"
+
+          echo "Previous installer version: ${previous_version}"
+          echo "Current installer version: ${current_version}"
+
+          if [[ -n "${previous_version}" && "${current_version}" != "${previous_version}" ]]; then
+            echo "should_release=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+  build:
+    name: Build Installer ${{ matrix.label }}
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: installer
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            runner: ubuntu-latest
+            binary_name: audiobookshelf-discord-rpc-installer
+            asset_name: audiobookshelf-discord-rpc-installer
+          - label: macos-arm64
+            runner: macos-latest
+            binary_name: audiobookshelf-discord-rpc-installer
+            asset_name: audiobookshelf-discord-rpc-installer-macos-arm64
+          - label: windows-x64
+            runner: windows-latest
+            binary_name: audiobookshelf-discord-rpc-installer.exe
+            asset_name: audiobookshelf-discord-rpc-installer.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: installer
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked
+
+      - name: Stage release artifact
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp "target/release/${{ matrix.binary_name }}" "release-assets/${{ matrix.asset_name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.label }}
+          path: installer/release-assets/${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  release:
+    name: Create Installer GitHub Release
+    needs:
+      - prepare
+      - build
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Show staged files
+        shell: bash
+        run: find dist -maxdepth 2 -type f | sort
+
+      - name: Create or update installer release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          generate_release_notes: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/installer-linux-x64/audiobookshelf-discord-rpc-installer
+            dist/installer-macos-arm64/audiobookshelf-discord-rpc-installer-macos-arm64
+            dist/installer-windows-x64/audiobookshelf-discord-rpc-installer.exe
