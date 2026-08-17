@@ -16,6 +16,14 @@ use url::Url;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+// A session counts as "playing" if the server saw a client sync within this window.
+// ABS clients sync every ~10s (web) to ~15s (mobile) while playing, and go silent
+// when paused/stopped, so freshness of `updatedAt` is the playing signal.
+// ponytail: assumes this machine and the ABS server have reasonably synced clocks.
+const PAUSE_THRESHOLD_SECS: f64 = 35.0;
+const ACTIVE_POLL_SECS: u64 = 5;
+const IDLE_POLL_SECS: u64 = 30;
+
 #[derive(Debug, Deserialize)]
 struct Config {
     discord_client_id: String,
@@ -24,11 +32,6 @@ struct Config {
     show_chapters: Option<bool>,
     use_abs_cover: Option<bool>,
     imgbb_api_key: Option<String>,
-}
-
-#[derive(Debug)]
-struct Book {
-    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +53,10 @@ struct Session {
     duration: f64,
     mediaMetadata: MediaMetadata,
     libraryItemId: String,
+    #[serde(rename = "mediaType")]
+    media_type: Option<String>,
+    /// Millisecond epoch of the last client progress sync for this session.
+    updatedAt: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,34 +80,12 @@ struct Chapter {
 #[derive(Debug, Deserialize)]
 struct LibraryItemResponse {
     media: MediaResponse,
-    #[serde(rename = "mediaType")]
-    media_type: Option<String>,
-    #[serde(rename = "mediaMetadata")]
-    media_metadata: Option<LibraryItemMetadata>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LibraryItemMetadata {
-    title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct MediaResponse {
     #[serde(default)]
     chapters: Vec<Chapter>,
-}
-
-#[derive(Debug)]
-struct PlaybackState {
-    last_api_time: SystemTime,
-    is_playing: bool,
-}
-
-#[derive(Debug)]
-struct TimingInfo {
-    last_api_time: Option<SystemTime>,
-    last_position: Option<f64>,
-    no_movement_cycles: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,20 +105,40 @@ struct ImgbbData {
     display_url: Option<String>,
 }
 
+/// The last activity we sent to Discord, so we only write over IPC when
+/// something visible changed. Discord ticks the progress bar client-side.
+#[derive(Debug)]
+struct LastActivity {
+    book: String,
+    large_text: String,
+    start_time: i64,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    activity_cleared: bool,
+    last_activity: Option<LastActivity>,
+    chapters_item_id: String,
+    chapters: Vec<Chapter>,
+    cover_url_cache: HashMap<String, String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let client = Client::new();
 
-    if let Some(latest_version) = check_for_update(&client).await? {
-        info!(
-            "A new version is available: {}. You're currently running version {}.",
-            latest_version, CURRENT_VERSION
-        );
-        info!("Please re-run the installer or visit https://github.com/0xGingi/audiobookshelf-discord-rpc/releases to download the latest version.");
-    } else {
-        info!("You're running the latest version: {}", CURRENT_VERSION);
+    match check_for_update(&client).await {
+        Ok(Some(latest_version)) => {
+            info!(
+                "A new version is available: {}. You're currently running version {}.",
+                latest_version, CURRENT_VERSION
+            );
+            info!("Please re-run the installer or visit https://github.com/0xGingi/audiobookshelf-discord-rpc/releases to download the latest version.");
+        }
+        Ok(None) => info!("You're running the latest version: {}", CURRENT_VERSION),
+        Err(e) => warn!("Version check failed (continuing anyway): {}", e),
     }
 
     let config_file = parse_args()?;
@@ -145,84 +150,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     discord.connect()?;
     info!("Audiobookshelf Discord RPC Connected!");
 
-    let mut playback_state = PlaybackState {
-        last_api_time: SystemTime::now(),
-        is_playing: false,
-    };
-    let mut current_book: Option<Book> = None;
-    let mut timing_info = TimingInfo {
-        last_api_time: None,
-        last_position: None,
-        no_movement_cycles: 0,
-    };
     let cache_file = cache_file_path(&config_file);
-    let mut cover_url_cache: HashMap<String, String> =
-        load_cover_url_cache_with_fallback(&cache_file);
+    let mut state = State {
+        cover_url_cache: load_cover_url_cache_with_fallback(&cache_file),
+        ..State::default()
+    };
 
+    let mut playing = false;
     loop {
-        if let Err(e) = set_activity(
-            &client,
-            &config,
-            &mut discord,
-            &mut playback_state,
-            &mut current_book,
-            &mut timing_info,
-            &mut cover_url_cache,
-            &cache_file,
-        )
-        .await
-        {
-            let mut is_pipe_error = false;
-            if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-                if io_err.kind() == ErrorKind::BrokenPipe
-                    || io_err.raw_os_error() == Some(232)
-                    || io_err.raw_os_error() == Some(32)
-                {
-                    is_pipe_error = true;
-                }
-            }
-
-            if !is_pipe_error {
-                let mut source = e.source();
-                while let Some(err) = source {
-                    if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
-                        if io_err.kind() == ErrorKind::BrokenPipe
-                            || io_err.raw_os_error() == Some(232)
-                            || io_err.raw_os_error() == Some(32)
-                        {
-                            is_pipe_error = true;
-                            break;
-                        }
+        match set_activity(&client, &config, &mut discord, &mut state, &cache_file).await {
+            Ok(is_playing) => playing = is_playing,
+            Err(e) => {
+                let mut is_pipe_error = false;
+                if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+                    if io_err.kind() == ErrorKind::BrokenPipe
+                        || io_err.raw_os_error() == Some(232)
+                        || io_err.raw_os_error() == Some(32)
+                    {
+                        is_pipe_error = true;
                     }
-                    source = err.source();
                 }
-            }
 
-            if is_pipe_error {
-                warn!("Connection to Discord lost (pipe closed). Attempting to reconnect...");
-                if let Err(close_err) = discord.close() {
-                    error!(
-                        "Error closing old Discord client (connection likely already broken): {}",
-                        close_err
-                    );
+                if !is_pipe_error {
+                    let mut source = e.source();
+                    while let Some(err) = source {
+                        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+                            if io_err.kind() == ErrorKind::BrokenPipe
+                                || io_err.raw_os_error() == Some(232)
+                                || io_err.raw_os_error() == Some(32)
+                            {
+                                is_pipe_error = true;
+                                break;
+                            }
+                        }
+                        source = err.source();
+                    }
                 }
-                time::sleep(Duration::from_secs(5)).await;
-                let mut new_discord = DiscordIpcClient::new(&config.discord_client_id);
-                if let Err(connect_err) = new_discord.connect() {
-                    error!("Failed to reconnect to Discord: {}", connect_err);
+
+                if is_pipe_error {
+                    warn!("Connection to Discord lost (pipe closed). Attempting to reconnect...");
+                    if let Err(close_err) = discord.close() {
+                        error!(
+                            "Error closing old Discord client (connection likely already broken): {}",
+                            close_err
+                        );
+                    }
+                    // Force a full re-send once reconnected.
+                    state.last_activity = None;
+                    state.activity_cleared = false;
+                    time::sleep(Duration::from_secs(5)).await;
+                    let mut new_discord = DiscordIpcClient::new(&config.discord_client_id);
+                    if let Err(connect_err) = new_discord.connect() {
+                        error!("Failed to reconnect to Discord: {}", connect_err);
+                    } else {
+                        info!("Successfully reconnected to Discord.");
+                        discord = new_discord;
+                    }
                 } else {
-                    info!("Successfully reconnected to Discord.");
-                    discord = new_discord;
+                    error!(
+                        "Error setting activity (not identified as pipe error): {}",
+                        e
+                    );
+                    error!("Full error details: {:?}", e);
                 }
-            } else {
-                error!(
-                    "Error setting activity (not identified as pipe error): {}",
-                    e
-                );
-                error!("Full error details: {:?}", e);
             }
         }
-        time::sleep(Duration::from_secs(15)).await;
+        let sleep_secs = if playing {
+            ACTIVE_POLL_SECS
+        } else {
+            IDLE_POLL_SECS
+        };
+        time::sleep(Duration::from_secs(sleep_secs)).await;
     }
 }
 
@@ -245,17 +243,27 @@ fn load_config(config_file: &str) -> Result<Config, Box<dyn std::error::Error>> 
     Ok(config)
 }
 
-#[allow(non_snake_case)]
+fn clear_activity_if_needed(
+    discord: &mut DiscordIpcClient,
+    state: &mut State,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !state.activity_cleared {
+        info!("No active playback; clearing Discord activity");
+        discord.clear_activity()?;
+        state.activity_cleared = true;
+        state.last_activity = None;
+    }
+    Ok(())
+}
+
+/// Returns whether a session is actively playing (drives the poll interval).
 async fn set_activity(
     client: &Client,
     config: &Config,
     discord: &mut DiscordIpcClient,
-    playback_state: &mut PlaybackState,
-    current_book: &mut Option<Book>,
-    timing_info: &mut TimingInfo,
-    cover_url_cache: &mut HashMap<String, String>,
+    state: &mut State,
     cache_file: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     let sessions_url = format!(
         "{}/api/me/listening-sessions?itemsPerPage=1",
         config.audiobookshelf_url
@@ -269,79 +277,50 @@ async fn set_activity(
         .json::<ListeningSessionsResponse>()
         .await?;
 
-    if resp.sessions.is_empty() {
-        info!("No active listening session");
-        discord.clear_activity()?;
-        return Ok(());
+    let session = match resp.sessions.first() {
+        Some(session) => session,
+        None => {
+            clear_activity_if_needed(discord, state)?;
+            return Ok(false);
+        }
+    };
+
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+    let secs_since_sync = (now_ms - session.updatedAt) as f64 / 1000.0;
+
+    if secs_since_sync >= PAUSE_THRESHOLD_SECS {
+        clear_activity_if_needed(discord, state)?;
+        return Ok(false);
     }
 
-    let session = &resp.sessions[0];
+    // Server-anchored position: last synced position plus time elapsed since
+    // the server recorded it. Accurate to within one client sync interval.
+    let position = (session.currentTime + secs_since_sync.max(0.0)).min(session.duration);
 
-    if timing_info.last_position.is_none() {
-        playback_state.is_playing = false;
-        discord.clear_activity()?;
-        timing_info.last_position = Some(session.currentTime);
-        timing_info.last_api_time = Some(SystemTime::now());
-        return Ok(());
-    }
+    let is_podcast = session.media_type.as_deref() == Some("podcast")
+        || session.mediaMetadata.podcast_title.is_some();
 
-    let current_time = session.currentTime;
-
-    if let (Some(last_time), Some(last_api_time)) =
-        (timing_info.last_position, timing_info.last_api_time)
+    // Chapters are not included in the listening-sessions payload, so fetch
+    // them from the library item -- once per book, not every poll.
+    if config.show_chapters.unwrap_or(false)
+        && !is_podcast
+        && state.chapters_item_id != session.libraryItemId
     {
-        let elapsed = SystemTime::now()
-            .duration_since(last_api_time)
-            .unwrap_or(Duration::from_secs(0));
-        if elapsed.as_secs() >= 2 && (current_time - last_time).abs() < f64::EPSILON {
-            timing_info.no_movement_cycles = timing_info.no_movement_cycles.saturating_add(1);
-            // Only treat as paused after 2 consecutive no-movement cycles.
-            // ABS clients often sync position every ~30s, so a single 15s poll
-            // with no change doesn't mean playback has stopped.
-            if timing_info.no_movement_cycles >= 2 {
-                playback_state.is_playing = false;
-                discord.clear_activity()?;
+        match fetch_chapters(client, config, &session.libraryItemId).await {
+            Ok(chapters) => {
+                state.chapters = chapters;
+                state.chapters_item_id = session.libraryItemId.clone();
             }
-            timing_info.last_position = Some(current_time);
-            timing_info.last_api_time = Some(SystemTime::now());
-            return Ok(());
-        } else if (current_time - last_time).abs() > f64::EPSILON {
-            playback_state.is_playing = true;
-            timing_info.no_movement_cycles = 0;
+            Err(e) => warn!("Failed to fetch chapters (will retry): {}", e),
         }
     }
-
-    if !playback_state.is_playing {
-        discord.clear_activity()?;
-        timing_info.last_position = Some(current_time);
-        timing_info.last_api_time = Some(SystemTime::now());
-        return Ok(());
-    }
-
-    let library_item_url = format!(
-        "{}/api/items/{}?include=chapters",
-        config.audiobookshelf_url, session.libraryItemId
-    );
-
-    let library_item: LibraryItemResponse = client
-        .get(&library_item_url)
-        .bearer_auth(&config.audiobookshelf_token)
-        .send()
-        .await?
-        .json()
-        .await?;
-
-    let is_podcast = library_item.media_type.as_deref() == Some("podcast")
-        || session.mediaMetadata.podcast_title.is_some();
 
     let genres = session
         .mediaMetadata
         .genres
-        .get(0)
+        .first()
         .map(|s| s.as_str())
         .unwrap_or("Unknown Genre");
-
-    let now = SystemTime::now();
 
     let large_text = if is_podcast {
         if let Some(podcast_title) = &session.mediaMetadata.podcast_title {
@@ -363,11 +342,10 @@ async fn set_activity(
             genres.to_string()
         }
     } else if config.show_chapters.unwrap_or(false) {
-        if let Some(current_chapter) = library_item
-            .media
+        if let Some(current_chapter) = state
             .chapters
             .iter()
-            .find(|ch| current_time >= ch.start && current_time <= ch.end)
+            .find(|ch| position >= ch.start && position <= ch.end)
         {
             if has_chapter_prefix(&current_chapter.title) {
                 current_chapter.title.to_string()
@@ -386,93 +364,36 @@ async fn set_activity(
             .mediaMetadata
             .title
             .as_ref()
-            .or_else(|| session.mediaMetadata.podcast_title.as_ref())
-            .or_else(|| {
-                library_item
-                    .media_metadata
-                    .as_ref()
-                    .and_then(|meta| meta.title.as_ref())
-            });
-
-        info!(
-            "Podcast detected - title from session: {:?}, podcast_title: {:?}",
-            session.mediaMetadata.title, session.mediaMetadata.podcast_title
-        );
-
+            .or(session.mediaMetadata.podcast_title.as_ref());
         if let Some(title) = podcast_title {
-            info!(
-                "Using podcast title: '{}', episode: '{}'",
-                title, session.displayTitle
-            );
             (title.clone(), session.displayTitle.clone())
         } else {
-            info!(
-                "No podcast title found, using displayTitle: '{}'",
-                session.displayTitle
-            );
             (session.displayTitle.clone(), session.displayAuthor.clone())
         }
     } else {
         (session.displayTitle.clone(), session.displayAuthor.clone())
     };
-    let duration = session.duration;
 
-    if current_book
-        .as_ref()
-        .map_or(true, |book| book.name != book_name)
-    {
-        *current_book = Some(Book {
-            name: book_name.clone(),
-        });
-        *playback_state = PlaybackState {
-            last_api_time: SystemTime::now(),
-            is_playing: false,
-        };
+    let now_secs = now_ms / 1000;
+    let start_time = now_secs - position.max(0.0) as i64;
+    let end_time = start_time.saturating_add(session.duration.max(0.0) as i64);
+
+    // Discord ticks the bar on its own; only re-send when the book, chapter,
+    // or anchor moved (a seek or a fresh sync shifts start_time by >2s).
+    if let Some(last) = &state.last_activity {
+        if last.book == book_name
+            && last.large_text == large_text
+            && (last.start_time - start_time).abs() <= 2
+        {
+            return Ok(true);
+        }
     }
 
-    let current_position = if playback_state.is_playing {
-        let elapsed = now
-            .duration_since(playback_state.last_api_time)
-            .unwrap_or(Duration::from_secs(0))
-            .as_secs_f64();
-
-        let adjusted_elapsed = elapsed * 0.8;
-
-        if (current_time - timing_info.last_position.unwrap_or(0.0)).abs() > f64::EPSILON {
-            playback_state.last_api_time = now;
-            current_time
-        } else {
-            timing_info.last_position.unwrap_or(current_time) + adjusted_elapsed
-        }
-    } else {
-        current_time
-    };
-
-    let activity_type = if is_podcast {
-        activity::ActivityType::Listening
-    } else {
-        activity::ActivityType::Listening
-    };
-
-    let mut activity_builder = if playback_state.is_playing {
-        let now_secs = now.duration_since(UNIX_EPOCH)?.as_secs() as i64;
-        let current_pos = current_position.max(0.0) as i64;
-        let total_dur = duration.max(0.0) as i64;
-
-        let start_time = now_secs.saturating_sub(current_pos);
-        let end_time = start_time.saturating_add(total_dur);
-
-        activity::Activity::new()
-            .details(&book_name)
-            .state(&author)
-            .timestamps(activity::Timestamps::new().start(start_time).end(end_time))
-            .activity_type(activity_type)
-    } else {
-        activity::Activity::new()
-            .details(&book_name)
-            .state(&author)
-            .activity_type(activity_type)
-    };
+    let mut activity_builder = activity::Activity::new()
+        .details(&book_name)
+        .state(&author)
+        .timestamps(activity::Timestamps::new().start(start_time).end(end_time))
+        .activity_type(activity::ActivityType::Listening);
 
     let cover_url = get_cover_path(
         client,
@@ -480,7 +401,7 @@ async fn set_activity(
         &book_name,
         &author,
         &session.libraryItemId,
-        cover_url_cache,
+        &mut state.cover_url_cache,
         is_podcast,
         cache_file,
     )
@@ -495,27 +416,39 @@ async fn set_activity(
     }
 
     discord.set_activity(activity_builder)?;
+    info!(
+        "Updated activity: \"{}\" at {:.0}s / {:.0}s",
+        book_name, position, session.duration
+    );
+    state.activity_cleared = false;
+    state.last_activity = Some(LastActivity {
+        book: book_name,
+        large_text,
+        start_time,
+    });
 
-    if let (Some(last_time), Some(last_api_time)) =
-        (timing_info.last_position, timing_info.last_api_time)
-    {
-        if (current_time - last_time).abs() > f64::EPSILON {
-            let elapsed = SystemTime::now()
-                .duration_since(last_api_time)
-                .unwrap_or(Duration::from_secs(0));
-            info!(
-                "API position updated: previous={:.2}s, current={:.2}s, time since last update={:.2}s",
-                last_time,
-                current_time,
-                elapsed.as_secs_f64()
-            );
-        }
-    }
+    Ok(true)
+}
 
-    timing_info.last_position = Some(current_time);
-    timing_info.last_api_time = Some(SystemTime::now());
+async fn fetch_chapters(
+    client: &Client,
+    config: &Config,
+    library_item_id: &str,
+) -> Result<Vec<Chapter>, Box<dyn std::error::Error>> {
+    let library_item_url = format!(
+        "{}/api/items/{}?include=chapters",
+        config.audiobookshelf_url, library_item_id
+    );
 
-    Ok(())
+    let library_item: LibraryItemResponse = client
+        .get(&library_item_url)
+        .bearer_auth(&config.audiobookshelf_token)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    Ok(library_item.media.chapters)
 }
 
 async fn get_cover_path(
@@ -529,7 +462,6 @@ async fn get_cover_path(
     cache_file: &Path,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     if let Some(cached) = cover_url_cache.get(library_item_id) {
-        info!("Using cached cover URL for {}", library_item_id);
         return Ok(Some(cached.clone()));
     }
     if let Some(abs_cover_url) =
@@ -586,7 +518,7 @@ async fn get_cover_path(
                 .await?
                 .json()
                 .await?;
-            if let Some(cover_url) = resp.results.get(0) {
+            if let Some(cover_url) = resp.results.first() {
                 return Ok(Some(cover_url.clone()));
             }
             Ok(None)
@@ -675,10 +607,6 @@ async fn get_cover_from_abs(
     cache_file: &Path,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let want_image_host_upload = !config.use_abs_cover.unwrap_or(false);
-
-    if let Some(cached_url) = cover_url_cache.get(library_item_id) {
-        return Ok(Some(cached_url.clone()));
-    }
 
     let cover_url = format!(
         "{}/api/items/{}/cover?width=400&format=jpeg",
