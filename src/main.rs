@@ -44,7 +44,7 @@ struct ListeningSessionsResponse {
     sessions: Vec<Session>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[allow(non_snake_case)]
 struct Session {
     displayTitle: String,
@@ -59,7 +59,7 @@ struct Session {
     updatedAt: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct MediaMetadata {
     #[serde(default)]
     genres: Vec<String>,
@@ -86,6 +86,65 @@ struct LibraryItemResponse {
 struct MediaResponse {
     #[serde(default)]
     chapters: Vec<Chapter>,
+}
+
+// Fallback playback signal for 3rd-party clients (e.g. Voca) that sync
+// /api/me media progress directly without ever opening a listening session.
+#[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
+struct MeResponse {
+    #[serde(default)]
+    mediaProgress: Vec<MediaProgress>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
+struct MediaProgress {
+    libraryItemId: String,
+    episodeId: Option<String>,
+    #[serde(default)]
+    currentTime: f64,
+    #[serde(default)]
+    duration: f64,
+    /// Millisecond epoch of the last progress sync.
+    lastUpdate: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ItemDetailsResponse {
+    #[serde(rename = "mediaType")]
+    media_type: Option<String>,
+    media: ItemDetailsMedia,
+}
+
+#[derive(Debug, Deserialize)]
+struct ItemDetailsMedia {
+    metadata: ItemDetailsMetadata,
+    #[serde(default)]
+    episodes: Vec<PodcastEpisode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ItemDetailsMetadata {
+    title: Option<String>,
+    #[serde(default)]
+    genres: Vec<String>,
+    #[serde(default)]
+    authors: Vec<AuthorRef>,
+    author: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorRef {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PodcastEpisode {
+    id: String,
+    title: Option<String>,
+    season: Option<String>,
+    episode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +180,10 @@ struct State {
     chapters_item_id: String,
     chapters: Vec<Chapter>,
     cover_url_cache: HashMap<String, String>,
+    /// Item metadata for the progress-based fallback, fetched once per
+    /// item/episode and reused with fresh position numbers each poll.
+    progress_key: String,
+    progress_template: Option<Session>,
 }
 
 #[tokio::main]
@@ -277,21 +340,28 @@ async fn set_activity(
         .json::<ListeningSessionsResponse>()
         .await?;
 
-    let session = match resp.sessions.first() {
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
+
+    let fresh_session = resp
+        .sessions
+        .into_iter()
+        .next()
+        .filter(|s| ((now_ms - s.updatedAt) as f64 / 1000.0) < PAUSE_THRESHOLD_SECS);
+
+    // Some 3rd-party clients (e.g. Voca) never open a listening session and
+    // only sync media progress, so fall back to progress freshness.
+    let session = match fresh_session {
         Some(session) => session,
-        None => {
-            clear_activity_if_needed(discord, state)?;
-            return Ok(false);
-        }
+        None => match fetch_progress_session(client, config, state, now_ms).await? {
+            Some(session) => session,
+            None => {
+                clear_activity_if_needed(discord, state)?;
+                return Ok(false);
+            }
+        },
     };
 
-    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
     let secs_since_sync = (now_ms - session.updatedAt) as f64 / 1000.0;
-
-    if secs_since_sync >= PAUSE_THRESHOLD_SECS {
-        clear_activity_if_needed(discord, state)?;
-        return Ok(false);
-    }
 
     // Server-anchored position: last synced position plus time elapsed since
     // the server recorded it. Accurate to within one client sync interval.
@@ -428,6 +498,103 @@ async fn set_activity(
     });
 
     Ok(true)
+}
+
+/// Builds a synthetic Session from the freshest /api/me media-progress entry,
+/// or None if nothing synced within the pause threshold.
+async fn fetch_progress_session(
+    client: &Client,
+    config: &Config,
+    state: &mut State,
+    now_ms: i64,
+) -> Result<Option<Session>, Box<dyn std::error::Error>> {
+    let me: MeResponse = client
+        .get(format!("{}/api/me", config.audiobookshelf_url))
+        .bearer_auth(&config.audiobookshelf_token)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let progress = match me.mediaProgress.into_iter().max_by_key(|p| p.lastUpdate) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    if (now_ms - progress.lastUpdate) as f64 / 1000.0 >= PAUSE_THRESHOLD_SECS {
+        return Ok(None);
+    }
+
+    let key = format!(
+        "{}/{}",
+        progress.libraryItemId,
+        progress.episodeId.as_deref().unwrap_or("")
+    );
+    if state.progress_key != key || state.progress_template.is_none() {
+        let item: ItemDetailsResponse = client
+            .get(format!(
+                "{}/api/items/{}",
+                config.audiobookshelf_url, progress.libraryItemId
+            ))
+            .bearer_auth(&config.audiobookshelf_token)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let is_podcast = item.media_type.as_deref() == Some("podcast");
+        let episode = progress
+            .episodeId
+            .as_ref()
+            .and_then(|id| item.media.episodes.iter().find(|e| &e.id == id));
+        let (ep_title, ep_season, ep_episode) = match episode {
+            Some(e) => (e.title.clone(), e.season.clone(), e.episode.clone()),
+            None => (None, None, None),
+        };
+
+        let item_title = item.media.metadata.title.clone();
+        let display_title = if is_podcast {
+            ep_title.or_else(|| item_title.clone())
+        } else {
+            item_title.clone()
+        }
+        .unwrap_or_else(|| "Unknown".to_string());
+        let display_author = if is_podcast {
+            item.media.metadata.author.clone().unwrap_or_default()
+        } else {
+            item.media
+                .metadata
+                .authors
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        state.progress_template = Some(Session {
+            displayTitle: display_title,
+            displayAuthor: display_author,
+            currentTime: 0.0,
+            duration: 0.0,
+            mediaMetadata: MediaMetadata {
+                genres: item.media.metadata.genres,
+                podcast_title: if is_podcast { item_title.clone() } else { None },
+                title: if is_podcast { item_title } else { None },
+                season: ep_season,
+                episode: ep_episode,
+            },
+            libraryItemId: progress.libraryItemId.clone(),
+            media_type: item.media_type,
+            updatedAt: 0,
+        });
+        state.progress_key = key;
+    }
+
+    let mut session = state.progress_template.clone().unwrap();
+    session.currentTime = progress.currentTime;
+    session.duration = progress.duration;
+    session.updatedAt = progress.lastUpdate;
+    Ok(Some(session))
 }
 
 async fn fetch_chapters(
