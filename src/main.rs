@@ -1,13 +1,12 @@
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
-use env_logger;
 use futures::future::join_all;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,6 +14,31 @@ use tokio::time;
 use url::Url;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const DEFAULT_DISCORD_CLIENT_ID: &str = "1283070638088650752";
+const DISCORD_RETRY_SECS: u64 = 15;
+
+const COVER_PROVIDERS: [&str; 14] = [
+    "audible",
+    "google",
+    "audible.jp",
+    "openlibrary",
+    "itunes",
+    "audible.ca",
+    "audible.uk",
+    "audible.au",
+    "audible.fr",
+    "audible.de",
+    "audible.it",
+    "audible.in",
+    "audible.es",
+    "fantlab",
+];
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn FreeConsole() -> i32;
+}
 
 // A session counts as "playing" if the server saw a client sync within this window.
 // ABS clients sync every ~10s (web) to ~15s (mobile) while playing, and go silent
@@ -23,9 +47,13 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PAUSE_THRESHOLD_SECS: f64 = 35.0;
 const ACTIVE_POLL_SECS: u64 = 5;
 const IDLE_POLL_SECS: u64 = 30;
+// set_activity never reads from the socket, so an unchanged activity is re-sent this
+// often: the write failing is how we notice Discord restarted.
+const REFRESH_SECS: i64 = 60;
 
 #[derive(Debug, Deserialize)]
 struct Config {
+    #[serde(default = "default_discord_client_id")]
     discord_client_id: String,
     audiobookshelf_url: String,
     audiobookshelf_token: String,
@@ -68,6 +96,9 @@ struct MediaMetadata {
     title: Option<String>,
     season: Option<String>,
     episode: Option<String>,
+    /// Podcast artwork from the RSS feed; already publicly hosted.
+    #[serde(rename = "imageUrl")]
+    image_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +163,8 @@ struct ItemDetailsMetadata {
     #[serde(default)]
     authors: Vec<AuthorRef>,
     author: Option<String>,
+    #[serde(rename = "imageUrl")]
+    image_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,6 +204,7 @@ struct LastActivity {
     book: String,
     large_text: String,
     start_time: i64,
+    sent_at: i64,
 }
 
 #[derive(Debug, Default)]
@@ -188,9 +222,41 @@ struct State {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let args: Vec<String> = env::args().collect();
+    let has_flag = |flag: &str| args.iter().any(|a| a == flag);
+    let config_file = match args.iter().position(|a| a == "-c") {
+        Some(i) => args
+            .get(i + 1)
+            .ok_or("missing argument for -c option")?
+            .clone(),
+        None => "config.json".to_string(),
+    };
 
-    let client = Client::new();
+    let mut logger =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    if has_flag("--background") {
+        // Autostart mode: close the console window Windows opens for us, log to a file instead.
+        #[cfg(windows)]
+        unsafe {
+            FreeConsole();
+        }
+        let log_path =
+            cache_file_path(&config_file).with_file_name("audiobookshelf-discord-rpc.log");
+        if let Ok(file) = fs::File::create(log_path) {
+            logger.target(env_logger::Target::Pipe(Box::new(file)));
+        }
+    }
+    logger.init();
+
+    let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
+
+    let setup_only = has_flag("--setup");
+    if setup_only || (!Path::new(&config_file).exists() && io::stdin().is_terminal()) {
+        setup(&client, &config_file).await?;
+        if setup_only {
+            return Ok(());
+        }
+    }
 
     match check_for_update(&client).await {
         Ok(Some(latest_version)) => {
@@ -198,86 +264,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "A new version is available: {}. You're currently running version {}.",
                 latest_version, CURRENT_VERSION
             );
-            info!("Please re-run the installer or visit https://github.com/0xGingi/audiobookshelf-discord-rpc/releases to download the latest version.");
+            info!("To update, re-run the install command: https://github.com/0xGingi/audiobookshelf-discord-rpc#install");
         }
         Ok(None) => info!("You're running the latest version: {}", CURRENT_VERSION),
         Err(e) => warn!("Version check failed (continuing anyway): {}", e),
     }
 
-    let config_file = parse_args()?;
     info!("Using config file: {}", config_file);
-
-    let config = load_config(&config_file)?;
-    info!("Using Audiobookshelf authentication (API Key recommended for v2.26.0+)");
-    let mut discord = DiscordIpcClient::new(&config.discord_client_id);
-    discord.connect()?;
-    info!("Audiobookshelf Discord RPC Connected!");
+    let config = load_config(&config_file)
+        .map_err(|e| format!("couldn't load {config_file}: {e} (run with --setup to create it)"))
+        .inspect_err(|e| error!("{e}"))?;
 
     let cache_file = cache_file_path(&config_file);
+    let mut cover_url_cache = load_cover_url_cache_with_fallback(&cache_file);
+    // Older versions cached private ABS cover links that Discord can't load; drop them.
+    cover_url_cache.retain(|_, url| !url.contains("/api/items/"));
     let mut state = State {
-        cover_url_cache: load_cover_url_cache_with_fallback(&cache_file),
+        cover_url_cache,
         ..State::default()
     };
 
-    let mut playing = false;
+    let mut discord = connect_discord(&config.discord_client_id).await;
     loop {
-        match set_activity(&client, &config, &mut discord, &mut state, &cache_file).await {
-            Ok(is_playing) => playing = is_playing,
-            Err(e) => {
-                let mut is_pipe_error = false;
-                if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-                    if io_err.kind() == ErrorKind::BrokenPipe
-                        || io_err.raw_os_error() == Some(232)
-                        || io_err.raw_os_error() == Some(32)
-                    {
-                        is_pipe_error = true;
-                    }
-                }
-
-                if !is_pipe_error {
-                    let mut source = e.source();
-                    while let Some(err) = source {
-                        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
-                            if io_err.kind() == ErrorKind::BrokenPipe
-                                || io_err.raw_os_error() == Some(232)
-                                || io_err.raw_os_error() == Some(32)
-                            {
-                                is_pipe_error = true;
-                                break;
-                            }
-                        }
-                        source = err.source();
-                    }
-                }
-
-                if is_pipe_error {
-                    warn!("Connection to Discord lost (pipe closed). Attempting to reconnect...");
-                    if let Err(close_err) = discord.close() {
-                        error!(
-                            "Error closing old Discord client (connection likely already broken): {}",
-                            close_err
-                        );
-                    }
+        let playing =
+            match set_activity(&client, &config, &mut discord, &mut state, &cache_file).await {
+                Ok(playing) => playing,
+                // Discord restarted, updated, or quit: wait for it to come back.
+                Err(e) if e.is::<discord_rich_presence::error::Error>() => {
+                    warn!("Lost connection to Discord ({}); reconnecting...", e);
+                    let _ = discord.close();
                     // Force a full re-send once reconnected.
                     state.last_activity = None;
                     state.activity_cleared = false;
-                    time::sleep(Duration::from_secs(5)).await;
-                    let mut new_discord = DiscordIpcClient::new(&config.discord_client_id);
-                    if let Err(connect_err) = new_discord.connect() {
-                        error!("Failed to reconnect to Discord: {}", connect_err);
-                    } else {
-                        info!("Successfully reconnected to Discord.");
-                        discord = new_discord;
-                    }
-                } else {
-                    error!(
-                        "Error setting activity (not identified as pipe error): {}",
-                        e
-                    );
-                    error!("Full error details: {:?}", e);
+                    discord = connect_discord(&config.discord_client_id).await;
+                    continue;
                 }
-            }
-        }
+                Err(e) => {
+                    error!("Error updating activity: {}", e);
+                    false
+                }
+            };
         let sleep_secs = if playing {
             ACTIVE_POLL_SECS
         } else {
@@ -287,23 +313,112 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn parse_args() -> Result<String, Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
-    if let Some(index) = args.iter().position(|arg| arg == "-c") {
-        if index + 1 < args.len() {
-            Ok(args[index + 1].clone())
-        } else {
-            Err("Error: missing argument for -c option".into())
-        }
-    } else {
-        Ok("config.json".to_string())
-    }
+fn default_discord_client_id() -> String {
+    DEFAULT_DISCORD_CLIENT_ID.to_string()
 }
 
 fn load_config(config_file: &str) -> Result<Config, Box<dyn std::error::Error>> {
     let config_str = fs::read_to_string(config_file)?;
-    let config: Config = serde_json::from_str(&config_str)?;
+    let mut config: Config = serde_json::from_str(&config_str)?;
+    config.audiobookshelf_url = config.audiobookshelf_url.trim_end_matches('/').to_string();
     Ok(config)
+}
+
+/// Waits until Discord is running and accepts the IPC handshake.
+async fn connect_discord(client_id: &str) -> DiscordIpcClient {
+    let mut warned = false;
+    loop {
+        let mut discord = DiscordIpcClient::new(client_id);
+        match discord.connect() {
+            Ok(()) => {
+                info!("Connected to Discord");
+                return discord;
+            }
+            Err(e) if !warned => {
+                warn!(
+                    "Can't reach Discord ({}); is it running? Retrying every {}s...",
+                    e, DISCORD_RETRY_SECS
+                );
+                warned = true;
+            }
+            Err(_) => {}
+        }
+        time::sleep(Duration::from_secs(DISCORD_RETRY_SECS)).await;
+    }
+}
+
+/// Interactive first-run wizard: asks for the few things we can't guess and writes the config.
+async fn setup(client: &Client, config_file: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\nAudiobookshelf Discord RPC setup (saving to {config_file})\n");
+    let (url, token) = loop {
+        let mut url = prompt("Audiobookshelf URL, e.g. http://192.168.1.10:13378")?;
+        if !url.contains("://") {
+            url = format!("http://{url}");
+        }
+        let url = url.trim_end_matches('/').to_string();
+        let token = prompt("API key (ABS > Settings > API Keys)")?;
+        let check = client
+            .get(format!("{url}/api/me"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status());
+        match check {
+            Ok(_) => break (url, token),
+            Err(e) => println!(
+                "Couldn't log in to Audiobookshelf: {e}\nCheck the URL and key and try again.\n"
+            ),
+        }
+    };
+    println!("Logged in!\n");
+
+    let show_chapters = !prompt("Show the current chapter instead of the genre? [Y/n]")?
+        .to_lowercase()
+        .starts_with('n');
+
+    println!("\nCovers: Discord can't load images from a private server. With a free ImgBB key");
+    println!("(https://api.imgbb.com/) your exact ABS covers are uploaded there; without one,");
+    println!("covers are looked up on Audible and other metadata providers.");
+    let imgbb_api_key = prompt("ImgBB API key (Enter to skip)")?;
+
+    let mut config = serde_json::json!({
+        "audiobookshelf_url": url,
+        "audiobookshelf_token": token,
+        "show_chapters": show_chapters,
+    });
+    if !imgbb_api_key.is_empty() {
+        config["imgbb_api_key"] = imgbb_api_key.into();
+    }
+    if let Some(dir) = Path::new(config_file).parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(config_file, serde_json::to_string_pretty(&config)?)?;
+    // The file holds your ABS API key.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(config_file, fs::Permissions::from_mode(0o600))?;
+    }
+    println!("\nSaved {config_file}\n");
+    Ok(())
+}
+
+fn prompt(label: &str) -> io::Result<String> {
+    print!("{label}: ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input)? == 0 {
+        return Err(io::Error::new(
+            ErrorKind::UnexpectedEof,
+            "no input (stdin closed)",
+        ));
+    }
+    Ok(input.trim().to_string())
+}
+
+/// Discord rejects activities with text fields over 128 characters.
+fn clip(s: &str) -> String {
+    s.chars().take(128).collect()
 }
 
 fn clear_activity_if_needed(
@@ -337,6 +452,7 @@ async fn set_activity(
         .bearer_auth(&config.audiobookshelf_token)
         .send()
         .await?
+        .error_for_status()?
         .json::<ListeningSessionsResponse>()
         .await?;
 
@@ -450,51 +566,64 @@ async fn set_activity(
 
     // Discord ticks the bar on its own; only re-send when the book, chapter,
     // or anchor moved (a seek or a fresh sync shifts start_time by >2s).
-    if let Some(last) = &state.last_activity {
-        if last.book == book_name
+    let unchanged = state.last_activity.as_ref().is_some_and(|last| {
+        last.book == book_name
             && last.large_text == large_text
             && (last.start_time - start_time).abs() <= 2
-        {
-            return Ok(true);
-        }
+    });
+    let refresh_due = state
+        .last_activity
+        .as_ref()
+        .is_none_or(|last| now_secs - last.sent_at >= REFRESH_SECS);
+    if unchanged && !refresh_due {
+        return Ok(true);
     }
 
     let mut activity_builder = activity::Activity::new()
-        .details(&book_name)
-        .state(&author)
+        .details(clip(&book_name))
+        .state(clip(&author))
         .timestamps(activity::Timestamps::new().start(start_time).end(end_time))
-        .activity_type(activity::ActivityType::Listening);
+        .activity_type(activity::ActivityType::Listening)
+        // Member list reads "Listening to <book>" instead of the app name.
+        .status_display_type(activity::StatusDisplayType::Details);
 
-    let cover_url = get_cover_path(
+    let cover_url = get_cover_url(
         client,
         config,
-        &book_name,
-        &author,
-        &session.libraryItemId,
-        &mut state.cover_url_cache,
+        &session,
         is_podcast,
+        &mut state.cover_url_cache,
         cache_file,
     )
-    .await?;
+    .await
+    .unwrap_or_else(|e| {
+        warn!("Cover lookup failed (will retry): {}", e);
+        None
+    });
 
     if let Some(ref url) = cover_url {
         activity_builder = activity_builder.assets(
             activity::Assets::new()
                 .large_image(url)
-                .large_text(&large_text),
+                .large_text(clip(&large_text)),
         );
     }
 
     discord.set_activity(activity_builder)?;
-    info!(
-        "Updated activity: \"{}\" at {:.0}s / {:.0}s",
-        book_name, position, session.duration
-    );
+    if unchanged {
+        debug!("Refreshed activity: \"{}\"", book_name);
+    } else {
+        info!(
+            "Updated activity: \"{}\" at {:.0}s / {:.0}s",
+            book_name, position, session.duration
+        );
+    }
     state.activity_cleared = false;
     state.last_activity = Some(LastActivity {
         book: book_name,
         large_text,
         start_time,
+        sent_at: now_secs,
     });
 
     Ok(true)
@@ -513,6 +642,7 @@ async fn fetch_progress_session(
         .bearer_auth(&config.audiobookshelf_token)
         .send()
         .await?
+        .error_for_status()?
         .json()
         .await?;
 
@@ -582,6 +712,7 @@ async fn fetch_progress_session(
                 title: if is_podcast { item_title } else { None },
                 season: ep_season,
                 episode: ep_episode,
+                image_url: item.media.metadata.image_url,
             },
             libraryItemId: progress.libraryItemId.clone(),
             media_type: item.media_type,
@@ -618,63 +749,96 @@ async fn fetch_chapters(
     Ok(library_item.media.chapters)
 }
 
-async fn get_cover_path(
+/// Returns a cover URL Discord can actually load, in order of preference:
+/// direct ABS link (opt-in, public servers only), podcast feed art, cache,
+/// ABS cover re-hosted on ImgBB, then a metadata-provider search for books.
+async fn get_cover_url(
+    client: &Client,
+    config: &Config,
+    session: &Session,
+    is_podcast: bool,
+    cover_url_cache: &mut HashMap<String, String>,
+    cache_file: &Path,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let item_id = &session.libraryItemId;
+    let abs_cover = format!(
+        "{}/api/items/{}/cover?width=400&format=jpeg",
+        config.audiobookshelf_url, item_id
+    );
+    if config.use_abs_cover.unwrap_or(false) {
+        return Ok(Some(abs_cover));
+    }
+    if let Some(feed_image) = session
+        .mediaMetadata
+        .image_url
+        .as_ref()
+        .filter(|_| is_podcast)
+    {
+        return Ok(Some(feed_image.clone()));
+    }
+    if let Some(cached) = cover_url_cache.get(item_id) {
+        return Ok(Some(cached.clone()));
+    }
+
+    let mut url = None;
+    if let Some(key) = config
+        .imgbb_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        let resp = client
+            .get(&abs_cover)
+            .bearer_auth(&config.audiobookshelf_token)
+            .send()
+            .await?;
+        // A 404 just means the item has no cover in ABS; fall through to the search.
+        if resp.status().is_success() {
+            // Upload errors propagate and stay uncached, so the next update retries.
+            let uploaded = upload_to_imgbb(client, key, &resp.bytes().await?).await?;
+            info!("Uploaded cover to ImgBB: {}", uploaded);
+            url = Some(uploaded);
+        }
+    }
+    if url.is_none() && !is_podcast {
+        url = search_cover_providers(
+            client,
+            config,
+            &session.displayTitle,
+            &session.displayAuthor,
+        )
+        .await;
+    }
+
+    if let Some(url) = &url {
+        cover_url_cache.insert(item_id.clone(), url.clone());
+        if let Err(e) = save_cover_url_cache(cache_file, cover_url_cache) {
+            warn!("Failed to persist urls.json: {}", e);
+        }
+    }
+    Ok(url)
+}
+
+/// First hit across ABS's metadata providers (in priority order); their image URLs are public.
+async fn search_cover_providers(
     client: &Client,
     config: &Config,
     title: &str,
     author: &str,
-    library_item_id: &str,
-    cover_url_cache: &mut HashMap<String, String>,
-    is_podcast: bool,
-    cache_file: &Path,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    if let Some(cached) = cover_url_cache.get(library_item_id) {
-        return Ok(Some(cached.clone()));
-    }
-    if let Some(abs_cover_url) =
-        get_cover_from_abs(client, config, library_item_id, cover_url_cache, cache_file).await?
-    {
-        return Ok(Some(abs_cover_url));
-    }
-
-    if is_podcast {
-        return Ok(None);
-    }
-
-    let search_title = if let Some(book_num) = extract_book_number(title) {
-        format!("{} {}", get_base_title(title), book_num)
-    } else {
-        get_base_title(title).to_string()
+) -> Option<String> {
+    let search_title = match extract_book_number(title) {
+        Some(book_num) => format!("{} {}", get_base_title(title), book_num),
+        None => get_base_title(title).to_string(),
     };
 
-    let providers = vec![
-        "audible",
-        "google",
-        "audible.jp",
-        "openlibrary",
-        "itunes",
-        "audible.ca",
-        "audible.uk",
-        "audible.au",
-        "audible.fr",
-        "audible.de",
-        "audible.it",
-        "audible.in",
-        "audible.es",
-        "fantlab",
-    ];
-
-    let futures = providers.iter().map(|provider| {
-        let client = client.clone();
-        let config = config;
-        let title = search_title.clone();
-        let author = author.to_string();
+    let searches = COVER_PROVIDERS.iter().map(|provider| {
+        let search_title = &search_title;
         async move {
             let url = Url::parse_with_params(
                 &format!("{}/api/search/covers", config.audiobookshelf_url),
                 &[
-                    ("title", title.as_str()),
-                    ("author", author.as_str()),
+                    ("title", search_title.as_str()),
+                    ("author", author),
                     ("provider", *provider),
                 ],
             )?;
@@ -685,39 +849,27 @@ async fn get_cover_path(
                 .await?
                 .json()
                 .await?;
-            if let Some(cover_url) = resp.results.first() {
-                return Ok(Some(cover_url.clone()));
-            }
-            Ok(None)
+            Ok::<_, Box<dyn std::error::Error>>(resp.results.into_iter().next())
         }
     });
 
-    let results: Vec<Result<Option<String>, Box<dyn std::error::Error>>> = join_all(futures).await;
-    for result in results {
-        if let Ok(Some(url)) = result {
-            cover_url_cache.insert(library_item_id.to_string(), url.clone());
-            if let Err(e) = save_cover_url_cache(cache_file, cover_url_cache) {
-                warn!("Failed to persist urls.json: {}", e);
-            }
-            return Ok(Some(url));
-        }
-    }
-
-    Ok(None)
+    join_all(searches)
+        .await
+        .into_iter()
+        .find_map(|result| result.ok().flatten())
 }
 
 fn extract_book_number(title: &str) -> Option<String> {
-    if let Some(idx) = title.find("Book ") {
-        let after_book = &title[idx + 5..];
-        if let Some(end) = after_book.find(|c: char| !c.is_numeric()) {
-            return Some(format!("Book {}", &after_book[..end]));
-        }
-    }
-    None
+    let after_book = &title[title.find("Book ")? + 5..];
+    let number: String = after_book
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    (!number.is_empty()).then(|| format!("Book {}", number))
 }
 
 fn get_base_title(title: &str) -> &str {
-    if let Some(idx) = title.find(|c| c == ':' || c == '(') {
+    if let Some(idx) = title.find([':', '(']) {
         title[..idx].trim()
     } else {
         title.trim()
@@ -764,68 +916,6 @@ fn has_chapter_prefix(title: &str) -> bool {
         }
     }
     false
-}
-
-async fn get_cover_from_abs(
-    client: &Client,
-    config: &Config,
-    library_item_id: &str,
-    cover_url_cache: &mut HashMap<String, String>,
-    cache_file: &Path,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let want_image_host_upload = !config.use_abs_cover.unwrap_or(false);
-
-    let cover_url = format!(
-        "{}/api/items/{}/cover?width=400&format=jpeg",
-        config.audiobookshelf_url, library_item_id
-    );
-
-    let response = client
-        .get(&cover_url)
-        .bearer_auth(&config.audiobookshelf_token)
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        info!("No cover found for library item: {}", library_item_id);
-        return Ok(None);
-    }
-
-    if want_image_host_upload {
-        if let Some(imgbb_api_key) = &config.imgbb_api_key {
-            let image_bytes = response.bytes().await?;
-            match upload_to_imgbb(client, imgbb_api_key, &image_bytes).await {
-                Ok(imgbb_url) => {
-                    info!("Successfully uploaded cover to ImgBB: {}", imgbb_url);
-                    cover_url_cache.insert(library_item_id.to_string(), imgbb_url.clone());
-                    if let Err(e) = save_cover_url_cache(cache_file, cover_url_cache) {
-                        warn!("Failed to persist urls.json: {}", e);
-                    }
-                    return Ok(Some(imgbb_url));
-                }
-                Err(e) => {
-                    warn!("Failed to upload to ImgBB: {}", e);
-                    // Do NOT cache the ABS URL on failure — Discord cannot access
-                    // private/authenticated ABS endpoints. Leave the cache empty so
-                    // the upload is retried on the next cycle.
-                    return Ok(None);
-                }
-            }
-        } else {
-            warn!("use_abs_cover is false but imgbb_api_key is missing; using ABS URL instead.");
-            cover_url_cache.insert(library_item_id.to_string(), cover_url.clone());
-            if let Err(e) = save_cover_url_cache(cache_file, cover_url_cache) {
-                warn!("Failed to persist urls.json: {}", e);
-            }
-            return Ok(Some(cover_url));
-        }
-    } else {
-        cover_url_cache.insert(library_item_id.to_string(), cover_url.clone());
-        if let Err(e) = save_cover_url_cache(cache_file, cover_url_cache) {
-            warn!("Failed to persist urls.json: {}", e);
-        }
-        return Ok(Some(cover_url));
-    }
 }
 
 async fn upload_to_imgbb(
@@ -887,7 +977,12 @@ async fn check_for_update(client: &Client) -> Result<Option<String>, Box<dyn std
     let release_info: ReleaseInfo = resp.json().await?;
     let latest_version = release_info.tag_name.trim_start_matches('v');
 
-    if latest_version != CURRENT_VERSION {
+    let parse = |v: &str| {
+        v.split('.')
+            .map(|n| n.parse::<u32>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    if parse(latest_version) > parse(CURRENT_VERSION) {
         Ok(Some(latest_version.to_string()))
     } else {
         Ok(None)
@@ -945,4 +1040,29 @@ fn save_cover_url_cache(
     let data = serde_json::to_string_pretty(cache)?;
     fs::write(path, data)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_parsing() {
+        assert_eq!(
+            extract_book_number("Dungeon Crawler Carl: Book 1").as_deref(),
+            Some("Book 1")
+        );
+        assert_eq!(
+            extract_book_number("Book 12 of the Series").as_deref(),
+            Some("Book 12")
+        );
+        assert_eq!(extract_book_number("The Book Thief"), None);
+        assert_eq!(
+            get_base_title("Dungeon Crawler Carl: Book 1"),
+            "Dungeon Crawler Carl"
+        );
+        assert!(has_chapter_prefix("Chapter 3"));
+        assert!(!has_chapter_prefix("Champions"));
+        assert_eq!(clip(&"é".repeat(200)).chars().count(), 128);
+    }
 }

@@ -76,7 +76,8 @@ jobs:
       matrix:
         include:
           - label: linux-x64
-            runner: ubuntu-latest
+            # Oldest supported runner = oldest glibc, so the binary runs on older distros.
+            runner: ubuntu-22.04
             binary_name: audiobookshelf-discord-rpc
             asset_name: audiobookshelf-discord-rpc-linux-x64
           - label: macos-arm64
