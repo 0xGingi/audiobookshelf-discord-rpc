@@ -50,6 +50,10 @@ const IDLE_POLL_SECS: u64 = 30;
 // set_activity never reads from the socket, so an unchanged activity is re-sent this
 // often: the write failing is how we notice Discord restarted.
 const REFRESH_SECS: i64 = 60;
+// Slack statuses expire on their own, so a crash or lost network can't leave one stuck;
+// we re-send well before expiry while playing.
+const SLACK_EXPIRY_SECS: i64 = 600;
+const SLACK_REFRESH_SECS: i64 = 300;
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -60,6 +64,9 @@ struct Config {
     show_chapters: Option<bool>,
     use_abs_cover: Option<bool>,
     imgbb_api_key: Option<String>,
+    /// Defaults to true; set false to run Slack-only on a machine without Discord.
+    discord: Option<bool>,
+    slack_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,6 +225,9 @@ struct State {
     /// item/episode and reused with fresh position numbers each poll.
     progress_key: String,
     progress_template: Option<Session>,
+    /// Last Slack status text we set ("" = none) and when.
+    slack_text: String,
+    slack_sent_at: i64,
 }
 
 #[tokio::main]
@@ -284,7 +294,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..State::default()
     };
 
-    let mut discord = connect_discord(&config.discord_client_id).await;
+    // ponytail: with Discord enabled, this (and reconnects) block until Discord runs, so
+    // Slack stalls meanwhile; make the connect non-blocking if that ever bites.
+    let mut discord = if config.discord.unwrap_or(true) {
+        Some(connect_discord(&config.discord_client_id).await)
+    } else {
+        None
+    };
     loop {
         let playing =
             match set_activity(&client, &config, &mut discord, &mut state, &cache_file).await {
@@ -292,11 +308,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Discord restarted, updated, or quit: wait for it to come back.
                 Err(e) if e.is::<discord_rich_presence::error::Error>() => {
                     warn!("Lost connection to Discord ({}); reconnecting...", e);
-                    let _ = discord.close();
+                    if let Some(d) = discord.as_mut() {
+                        let _ = d.close();
+                    }
                     // Force a full re-send once reconnected.
                     state.last_activity = None;
                     state.activity_cleared = false;
-                    discord = connect_discord(&config.discord_client_id).await;
+                    discord = Some(connect_discord(&config.discord_client_id).await);
                     continue;
                 }
                 Err(e) => {
@@ -422,12 +440,14 @@ fn clip(s: &str) -> String {
 }
 
 fn clear_activity_if_needed(
-    discord: &mut DiscordIpcClient,
+    discord: &mut Option<DiscordIpcClient>,
     state: &mut State,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !state.activity_cleared {
-        info!("No active playback; clearing Discord activity");
-        discord.clear_activity()?;
+        if let Some(discord) = discord {
+            info!("No active playback; clearing Discord activity");
+            discord.clear_activity()?;
+        }
         state.activity_cleared = true;
         state.last_activity = None;
     }
@@ -438,7 +458,7 @@ fn clear_activity_if_needed(
 async fn set_activity(
     client: &Client,
     config: &Config,
-    discord: &mut DiscordIpcClient,
+    discord: &mut Option<DiscordIpcClient>,
     state: &mut State,
     cache_file: &Path,
 ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -471,6 +491,7 @@ async fn set_activity(
         None => match fetch_progress_session(client, config, state, now_ms).await? {
             Some(session) => session,
             None => {
+                update_slack(client, config, state, "", now_ms / 1000).await;
                 clear_activity_if_needed(discord, state)?;
                 return Ok(false);
             }
@@ -561,6 +582,17 @@ async fn set_activity(
     };
 
     let now_secs = now_ms / 1000;
+    update_slack(
+        client,
+        config,
+        state,
+        &slack_status_text(&book_name, &author),
+        now_secs,
+    )
+    .await;
+    let Some(discord) = discord else {
+        return Ok(true);
+    };
     let start_time = now_secs - position.max(0.0) as i64;
     let end_time = start_time.saturating_add(session.duration.max(0.0) as i64);
 
@@ -627,6 +659,65 @@ async fn set_activity(
     });
 
     Ok(true)
+}
+
+/// Status text is capped at 100 characters by Slack.
+fn slack_status_text(book: &str, author: &str) -> String {
+    let text = if author.is_empty() {
+        book.to_string()
+    } else {
+        format!("{book} — {author}")
+    };
+    text.chars().take(100).collect()
+}
+
+/// Sets the Slack status to `text` (or clears it, for "") when it changed or is near expiry.
+/// Failures are logged, not returned, so Slack trouble never blocks Discord.
+async fn update_slack(client: &Client, config: &Config, state: &mut State, text: &str, now: i64) {
+    let Some(token) = &config.slack_token else {
+        return;
+    };
+    let due = state.slack_text != text
+        || (!text.is_empty() && now - state.slack_sent_at >= SLACK_REFRESH_SECS);
+    if !due {
+        return;
+    }
+    let (emoji, expiration) = if text.is_empty() {
+        ("", 0)
+    } else {
+        (":headphones:", now + SLACK_EXPIRY_SECS)
+    };
+    let body = serde_json::json!({"profile": {
+        "status_text": text,
+        "status_emoji": emoji,
+        "status_expiration": expiration,
+    }});
+    let result: Result<serde_json::Value, reqwest::Error> = async {
+        client
+            .post("https://slack.com/api/users.profile.set")
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+    }
+    .await;
+    // Slack reports most errors as HTTP 200 with {"ok": false, "error": "..."}.
+    match result {
+        Ok(resp) if resp["ok"] == true => {
+            if text.is_empty() {
+                info!("Cleared Slack status");
+            } else if state.slack_text != text {
+                info!("Updated Slack status: \"{}\"", text);
+            }
+            state.slack_text = text.to_string();
+            state.slack_sent_at = now;
+        }
+        Ok(resp) => warn!("Couldn't update Slack status: {}", resp["error"]),
+        Err(e) => warn!("Couldn't update Slack status: {}", e),
+    }
 }
 
 /// Builds a synthetic Session from the freshest /api/me media-progress entry,
@@ -1064,5 +1155,14 @@ mod tests {
         assert!(has_chapter_prefix("Chapter 3"));
         assert!(!has_chapter_prefix("Champions"));
         assert_eq!(clip(&"é".repeat(200)).chars().count(), 128);
+        assert_eq!(
+            slack_status_text("Dune", "Frank Herbert"),
+            "Dune — Frank Herbert"
+        );
+        assert_eq!(slack_status_text("Dune", ""), "Dune");
+        assert_eq!(
+            slack_status_text(&"é".repeat(200), "x").chars().count(),
+            100
+        );
     }
 }

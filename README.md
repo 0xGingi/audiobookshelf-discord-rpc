@@ -51,8 +51,20 @@ docker compose up -d
 | `imgbb_api_key` | Optional, see covers below |
 | `use_abs_cover` | Optional. `true` links covers straight from your ABS server; only works if it's reachable from the internet |
 | `discord_client_id` | Optional. Leave it out unless you've made your own Discord app |
+| `slack_token` | Optional. Also shows what you're listening to as your Slack status, see below |
+| `discord` | Optional. Set `false` to skip Discord, e.g. Slack-only on a machine without Discord |
 
 **Covers:** Discord can't load images from a private server, so by default covers are looked up on Audible and other metadata providers (podcasts use their feed artwork). For your exact ABS covers, add a free [ImgBB API key](https://api.imgbb.com/) and they'll be uploaded there. Cover URLs are cached in `urls.json` next to the config; delete it to refetch them.
+
+## Slack Status
+
+Sets your Slack status to `🎧 Book — Author` while you listen. It clears when you stop and expires on its own after 10 minutes if the app isn't running. It replaces any status you had set yourself.
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) > **Create New App** > **From scratch**, and pick your workspace.
+2. **OAuth & Permissions** > **User Token Scopes** > add `users.profile:write`.
+3. **Install to Workspace** (your workspace may need an admin to approve it), then copy the **User OAuth Token** (`xoxp-...`) into `slack_token`.
+
+If Discord isn't running on the machine, set `"discord": false`. Otherwise the app waits for Discord and doesn't update Slack in the meantime.
 
 ## Get API Key (Must Be Admin)
 
